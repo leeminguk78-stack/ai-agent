@@ -16,7 +16,7 @@ import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"
@@ -420,9 +420,16 @@ def kill_proc(p):
 
 
 def rootfs():
-    """Папка Ubuntu на диске Termux; None — запущены не в Termux (проверить нельзя)."""
+    """Папка Ubuntu на диске Termux; None — не нашли (не Termux или незнакомая версия proot-distro): тогда не гадаем."""
     pre = os.environ.get("PREFIX")
-    return Path(pre) / "var/lib/proot-distro/installed-rootfs" / cfg["claude"]["distro"] if pre else None
+    if not pre:
+        return None
+    base, name = Path(pre) / "var/lib/proot-distro", cfg["claude"]["distro"]
+    for p in (base / "containers" / name / "rootfs",      # proot-distro 5+ (новая раскладка)
+              base / "installed-rootfs" / name):          # старые версии
+        if p.is_dir():
+            return p
+    return None
 
 
 def bins(e):

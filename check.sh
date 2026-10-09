@@ -19,7 +19,9 @@ info "Версия Termux: ${TERMUX_VERSION:-неизвестно}"
 command -v termux-wake-lock >/dev/null && ok "termux-wake-lock" || no "termux-wake-lock не найден"
 
 echo "== Инструменты =="
-check_tool() { local n=$1; shift; if command -v "$n" >/dev/null 2>&1; then ok "$(printf '%-10s' "$n") $("$@" 2>&1 | head -1)"; else no "$n"; fi; }
+# первая непустая строка вывода, без цветовых кодов и \r (некоторые программы рисуют прогресс)
+first() { tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | awk 'NF{print; exit}'; }
+check_tool() { local n=$1; shift; if command -v "$n" >/dev/null 2>&1; then ok "$(printf '%-10s' "$n") $("$@" 2>&1 | first)"; else no "$n"; fi; }
 check_tool python python --version
 check_tool git git --version
 check_tool node node --version
@@ -29,7 +31,7 @@ check_tool ollama ollama --version
 echo "== Claude Code (в Ubuntu) =="
 if ! command -v proot-distro >/dev/null; then
   no "proot-distro не установлен: pkg install proot-distro"
-elif [ ! -d "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu" ]; then
+elif ! proot-distro login ubuntu -- true >/dev/null 2>&1; then
   no "Ubuntu не установлена: proot-distro install ubuntu"
 elif ! proot-distro login ubuntu -- test -x /root/.local/bin/claude 2>/dev/null; then
   no "Claude Code не установлен в Ubuntu (см. README)"
@@ -44,7 +46,7 @@ fi
 
 echo "== Codex (в Ubuntu, необязательно) =="
 CX='export PATH=/root/.local/bin:/usr/local/bin:$PATH; codex'
-if [ ! -d "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu" ]; then
+if ! command -v proot-distro >/dev/null || ! proot-distro login ubuntu -- true >/dev/null 2>&1; then
   info "Сначала нужна Ubuntu (см. выше)"
 elif ! proot-distro login ubuntu -- bash -c "$CX --version" >/dev/null 2>&1; then
   info "Codex не установлен (второй ИИ, подписка ChatGPT) — см. README"

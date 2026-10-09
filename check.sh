@@ -25,7 +25,7 @@ check_tool() { local n=$1; shift; if command -v "$n" >/dev/null 2>&1; then ok "$
 check_tool python python --version
 check_tool git git --version
 check_tool node node --version
-check_tool proot-distro proot-distro --version
+check_tool proot-distro printf 'установлен'      # у proot-distro 5+ нет ключа --version
 check_tool ollama ollama --version
 
 echo "== Claude Code (в Ubuntu) =="

@@ -1,0 +1,119 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#181b22">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<title>Агент</title>
+<style>
+:root{--bg:#0f1115;--panel:#181b22;--line:#262a33;--fg:#e6e8ee;--mut:#8a90a0;--acc:#5b8cff;--user:#22324f;--err:#5a1f24;--code:#0b0d12}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif;height:100dvh;display:flex;flex-direction:column}
+header{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 12px;padding-top:max(8px,env(safe-area-inset-top));background:var(--panel);border-bottom:1px solid var(--line)}
+header b{flex:1;white-space:nowrap}
+button,select{background:#262b36;color:var(--fg);border:0;border-radius:8px;padding:8px 10px;font:inherit;font-size:14px}
+button.p{background:var(--acc);color:#fff}
+#off{display:none;background:#4a3417;color:#ffd9a0;padding:8px 14px;font-size:14px}
+#off code{background:#0008;padding:1px 6px;border-radius:5px}
+#log{flex:1;overflow-y:auto;padding:12px;max-width:900px;width:100%;margin:0 auto}
+.msg{white-space:pre-wrap;padding:10px 12px;border-radius:12px;margin:8px 0;overflow-wrap:anywhere}
+.user{background:var(--user);margin-left:15%}.bot{background:var(--panel)}.err{background:var(--err)}
+.sys,.note{color:var(--mut);padding:2px 12px}.note{font-style:italic}
+.meta{color:var(--mut);font-size:12px;margin-top:6px}
+.msg .h{font-weight:700;margin-top:4px}
+.msg .li{padding-left:1.1em;text-indent:-1.1em}
+.msg .gap{height:.55em}
+.msg code{background:var(--code);border:1px solid var(--line);border-radius:5px;padding:0 4px;font:13px ui-monospace,monospace}
+.msg pre.code{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0;overflow-x:auto;white-space:pre;font:13px/1.4 ui-monospace,monospace}
+details.step{background:#14171d;border:1px solid var(--line);border-radius:8px;margin:4px 0;font-size:13px}
+details.step summary{padding:6px 10px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+details.step pre{margin:0;padding:8px 10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow-y:auto}
+#wait{display:none;color:var(--mut);padding:4px 16px;max-width:900px;width:100%;margin:0 auto;font-size:13px}
+footer{display:flex;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:var(--panel);max-width:900px;width:100%;margin:0 auto}
+textarea{flex:1;resize:none;background:var(--bg);color:var(--fg);border:1px solid #2a2f3a;border-radius:10px;padding:10px;font:inherit;height:64px}
+#set{display:none;padding:12px;background:var(--panel);border-bottom:1px solid var(--line)}
+#set h4{margin:10px 0 0}
+#set label{display:block;font-size:13px;color:var(--mut);margin-top:8px}
+#set input,#set select{width:100%;padding:8px;background:var(--bg);color:var(--fg);border:1px solid #2a2f3a;border-radius:8px}
+#ver{color:var(--mut);font-size:12px}
+a{color:var(--acc)}
+</style></head><body>
+<header><b>🤖 Агент</b>
+<select id="eng" onchange="setEng()"><option value="claude">Claude Code</option><option value="api">API-модель</option></select>
+<button onclick="files()">📁</button><button onclick="backup()">💾</button><button onclick="reset()">🗑</button><button onclick="toggleSet()">⚙</button></header>
+<div id="off">⚠️ Нет связи с агентом. Запусти в Termux: <code>bash ~/agent-app/start.sh</code></div>
+<div id="set">
+<h4>Claude Code</h4>
+<label>Модель (пусто — по умолчанию; sonnet или haiku тратят меньше лимитов)</label><input id="ccm" placeholder="по умолчанию">
+<h4>API-модель</h4>
+<label>Провайдер</label><select id="prov" onchange="fill()"></select>
+<label>Модель</label><input id="model" placeholder="имя модели">
+<label>Base URL</label><input id="url">
+<label>API-ключ <span id="haskey"></span></label><input id="key" type="password" placeholder="пусто — не менять">
+<p><button class="p" onclick="saveSet()">Сохранить</button></p>
+<div id="ver"></div>
+</div>
+<div id="log"></div>
+<div id="wait">⏳ агент работает… приложение можно свернуть — результат не потеряется</div>
+<footer><textarea id="inp" placeholder="Задача для агента…"></textarea><button class="p" id="send" onclick="send()">➤</button></footer>
+<script>
+const $=s=>document.querySelector(s),log=$('#log');let C={},last=0,busy=false,timer=null,first=true;
+function el(t,c,x){const d=document.createElement(t);if(c)d.className=c;if(x!=null)d.textContent=x;return d}
+function linkify(d,s){const re=/https?:\/\/[^\s<>"'`»)\]]+/g;let i=0,m;
+while((m=re.exec(s))){d.append(s.slice(i,m.index));const a=el('a',null,m[0]);a.href=m[0];a.target='_blank';d.append(a);i=m.index+m[0].length}
+d.append(s.slice(i))}
+// Markdown: `код`, **жирный**, ссылки, заголовки, списки, блоки ```кода``` — только через DOM, без innerHTML
+function inl(p,s){const re=/(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(https?:\/\/[^\s<>"'`»)\]]+)/g;let i=0,m;
+while((m=re.exec(s))){p.append(s.slice(i,m.index));
+if(m[1])p.append(el('code',null,m[1].slice(1,-1)));
+else if(m[2]){const b=el('b');inl(b,m[2].slice(2,-2));p.append(b)}
+else{const u=m[3].replace(/[.,;:!?]+$/,''),a=el('a',null,u);a.href=u;a.target='_blank';p.append(a,m[3].slice(u.length))}
+i=m.index+m[0].length}
+p.append(s.slice(i))}
+function md(p,t){t.split('```').forEach((x,k)=>{
+if(k%2){p.append(el('pre','code',x.replace(/^[^\n]*\n/,'').replace(/\n$/,'')));return}
+x.replace(/^\n|\n$/g,'').split('\n').forEach(l=>{let m,d;
+if((m=l.match(/^#{1,4}\s+(.*)/))){d=el('div','h');inl(d,m[1])}
+else if((m=l.match(/^\s*[-*•]\s+(.*)/))){d=el('div','li');d.append('• ');inl(d,m[1])}
+else if((m=l.match(/^\s*(\d+)[.)]\s+(.*)/))){d=el('div','li');d.append(m[1]+'. ');inl(d,m[2])}
+else if(!l.trim())d=el('div','gap');
+else{d=el('div');inl(d,l)}
+p.append(d)})})}
+function render(e){let d;
+if(e.t=='step'){d=el('details','step');d.append(el('summary',null,(e.err?'⚠️ ':'🔧 ')+e.tool+' '+(e.brief||'')),el('pre',null,(e.args||'')+'\n\n→ '+(e.result||'')))}
+else{d=el('div','msg '+e.t);if(e.t=='bot'||e.t=='note')md(d,e.text||'');else linkify(d,e.text||'');
+if(e.meta)d.append(el('div','meta','⏱ '+e.meta.sec+' с · ходов: '+e.meta.turns))}
+log.appendChild(d)}
+async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}
+function setBusy(b){busy=b;$('#send').textContent=b?'⏹':'➤';$('#wait').style.display=b?'block':'none'}
+async function poll(){clearTimeout(timer);
+try{const j=await api('/api/log?after='+last);$('#off').style.display='none';
+const down=log.scrollHeight-log.scrollTop-log.clientHeight<150;
+if(first&&!j.entries.length)render({t:'sys',text:'Опиши задачу, например: «Создай сайт-визитку кофейни в sites/coffee»'});first=false;
+j.entries.forEach(e=>{render(e);last=e.seq});if(j.entries.length&&down)log.scrollTop=log.scrollHeight;
+setBusy(j.busy);if(j.engine&&$('#eng').value!=j.engine)$('#eng').value=j.engine}
+catch(e){$('#off').style.display='block'}
+timer=setTimeout(poll,busy?1500:6000)}
+async function send(){if(busy){await api('/api/stop',{});poll();return}
+const t=$('#inp').value.trim();if(!t)return;$('#inp').value='';
+const j=await api('/api/chat',{message:t});if(j.error)render({t:'err',text:j.error});else setBusy(true);
+log.scrollTop=log.scrollHeight;poll()}
+async function files(){const j=await api('/api/files');const d=el('div','msg bot');
+j.files.forEach(f=>{const a=el('a',null,f.name);if(f.url){a.href=f.url;a.target='_blank'}d.append(a,el('br'))});
+if(!j.files.length)d.textContent='(пусто)';log.appendChild(d);log.scrollTop=log.scrollHeight}
+async function backup(){const j=await api('/api/backup',{});render({t:'sys',text:'💾 '+(j.result||j.error)})}
+async function reset(){if(!confirm('Начать новый разговор? Файлы проектов останутся.'))return;
+const j=await api('/api/reset',{});if(j.error){render({t:'err',text:j.error});return}log.innerHTML='';last=0;poll()}
+function toggleSet(){const s=$('#set');s.style.display=s.style.display=='block'?'none':'block'}
+function fill(){const p=C.providers[$('#prov').value]||{};$('#model').value=p.model||'';$('#url').value=p.base_url||'';
+$('#haskey').textContent=p.has_key?'(сохранён)':'(не задан)';$('#key').value=''}
+async function load(){try{C=await api('/api/config')}catch(e){return}$('#prov').innerHTML='';
+Object.keys(C.providers).forEach(n=>{const o=el('option',null,n);o.value=n;$('#prov').append(o)});
+$('#prov').value=C.provider;$('#eng').value=C.engine;$('#ccm').value=C.cc_model||'';$('#ver').textContent='Агент v'+C.version;fill()}
+async function saveSet(){C=await api('/api/config',{provider:$('#prov').value,model:$('#model').value,base_url:$('#url').value,api_key:$('#key').value,cc_model:$('#ccm').value});
+fill();render({t:'sys',text:'⚙ Настройки сохранены'})}
+async function setEng(){C=await api('/api/config',{engine:$('#eng').value});render({t:'sys',text:'Движок: '+$('#eng').selectedOptions[0].textContent})}
+$('#inp').addEventListener('keydown',e=>{if(e.key=='Enter'&&(e.ctrlKey||e.metaKey))send()});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll()});
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+load();poll();
+</script></body></html>

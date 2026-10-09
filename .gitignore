@@ -1,0 +1,12 @@
+# Данные агента хранятся в ~/agent, а не в репозитории.
+# Эти правила — страховка, если что-то окажется рядом с кодом.
+__pycache__/
+*.pyc
+*.tmp
+config.json
+log.json
+state.json
+history.json
+server.log
+workspace/
+backups/

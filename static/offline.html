@@ -14,9 +14,20 @@ button{background:#5b8cff;color:#fff;border:0;border-radius:12px;padding:12px 24
 <div class="c">
 <img src="/icon-192.png" alt="">
 <h2>Агент не запущен</h2>
+<div id="app" style="display:none">
+<p>Нажми кнопку — приложение запустит агента в Termux.</p>
+<button onclick="AgentApp.startAgent()">▶ Запустить агента</button>
+<p id="st" style="color:#ffd9a0"></p>
+</div>
+<div id="manual">
 <p>Открой Termux и выполни команду:</p>
 <code>bash ~/agent-app/start.sh</code>
 <p>Если Android закрыл Termux, просто открой его снова — команда та же.</p>
+</div>
 <button onclick="location.reload()">Повторить</button>
 </div>
+<script>
+function setStatus(t){document.getElementById('st').textContent=t}
+if(window.AgentApp){document.getElementById('app').style.display='block';document.getElementById('manual').style.display='none'}
+</script>
 </body></html>

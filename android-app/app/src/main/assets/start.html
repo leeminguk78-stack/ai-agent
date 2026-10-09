@@ -1,0 +1,32 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Агент</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#e6e8ee;font:16px/1.5 system-ui,sans-serif;padding:24px;box-sizing:border-box}
+.c{max-width:440px;width:100%;text-align:center}
+img{width:96px;height:96px;border-radius:24px}
+h2{margin:16px 0 8px}
+p{color:#a4aabb;margin:8px 0}
+button{background:#5b8cff;color:#fff;border:0;border-radius:12px;padding:14px 26px;font:inherit;margin:8px 4px 4px}
+button.s{background:#262b36;color:#e6e8ee;padding:10px 16px;font-size:15px}
+#st{min-height:1.5em;color:#ffd9a0;margin-top:12px}
+details{margin-top:20px;text-align:left;background:#181b22;border:1px solid #262a33;border-radius:12px;padding:10px 14px}
+summary{color:#a4aabb}
+code{display:block;background:#0b0d12;border-radius:8px;padding:10px;margin:8px 0;font:13px ui-monospace,monospace;word-break:break-all;user-select:all;color:#e6e8ee}
+</style></head><body><div class="c">
+<img src="icon.png" alt="">
+<h2>Агент не запущен</h2>
+<p>Агент работает внутри Termux. Нажми кнопку — приложение запустит его само.</p>
+<button onclick="AgentApp.startAgent()">▶ Запустить агента</button><br>
+<button class="s" onclick="AgentApp.retry()">Проверить снова</button>
+<button class="s" onclick="AgentApp.openTermux()">Открыть Termux</button>
+<p id="st"></p>
+<details><summary>Первая настройка (один раз)</summary>
+<p>1. В Termux разреши запуск команд из других приложений:</p>
+<code>mkdir -p ~/.termux && echo "allow-external-apps = true" >> ~/.termux/termux.properties && termux-reload-settings</code>
+<p>2. При первом запуске приложение попросит разрешение «Запуск команд в среде Termux» — разреши. Если отказал раньше:</p>
+<button class="s" onclick="AgentApp.openAppSettings()">Настройки приложения</button>
+</details>
+</div>
+<script>function setStatus(t){document.getElementById('st').textContent=t}</script>
+</body></html>

@@ -1,0 +1,54 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android-app/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # чтобы публиковать APK в релизы
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      # Ключ подписи хранится в кэше Actions, а не в публичном репозитории.
+      # Один и тот же ключ = каждое обновление ставится поверх старой версии.
+      - name: Ключ подписи
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-signing-key-v1
+
+      - name: Сборка APK
+        working-directory: android-app
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Публикация в релизы
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android-app/app/build/outputs/apk/debug/app-debug.apk agent.apk
+          FP=$(keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep 'SHA256:' | head -1 | awk '{print $2}')
+          gh release create "apk-${{ github.run_number }}" agent.apk \
+            --title "Агент APK #${{ github.run_number }}" \
+            --notes "Сборка из коммита ${GITHUB_SHA::7}. Отпечаток ключа подписи: ${FP}" \
+            --latest

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ИИ-агент-разработчик для Termux — v0.3
+ИИ-агент-разработчик для Termux — v0.4
 Движки: Claude Code (подписка, через proot Ubuntu) и API-модели (Gemini/OpenRouter/Ollama).
 Только стандартная библиотека Python.
   Пульт (PWA): http://127.0.0.1:8765
@@ -12,7 +12,7 @@ import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.3"
+VERSION = "0.4"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"

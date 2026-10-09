@@ -1,7 +1,7 @@
 // Service worker пульта.
 // Задача одна: если агент в Termux не запущен, показать подсказку вместо ошибки браузера.
 // Запросы к API не кэшируются — пульт всегда показывает живые данные.
-const CACHE = 'agent-v3';
+const CACHE = 'agent-v4';
 const OFFLINE = ['/offline.html', '/icon-192.png'];
 
 self.addEventListener('install', e => {

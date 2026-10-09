@@ -42,6 +42,21 @@ else
   fi
 fi
 
+echo "== Codex (в Ubuntu, необязательно) =="
+CX='export PATH=/root/.local/bin:/usr/local/bin:$PATH; codex'
+if [ ! -d "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu" ]; then
+  info "Сначала нужна Ubuntu (см. выше)"
+elif ! proot-distro login ubuntu -- bash -c "$CX --version" >/dev/null 2>&1; then
+  info "Codex не установлен (второй ИИ, подписка ChatGPT) — см. README"
+else
+  ok "$(proot-distro login ubuntu -- bash -c "$CX --version" 2>/dev/null | head -1)"
+  if proot-distro login ubuntu -- bash -c "$CX login status" >/dev/null 2>&1; then
+    ok "Вход в ChatGPT выполнен"
+  else
+    no "Нет входа: proot-distro login ubuntu, затем /root/.local/bin/codex login"
+  fi
+fi
+
 echo "== Агент =="
 if curl -s -m 2 -o /dev/null http://127.0.0.1:8765/api/config; then
   ok "Агент работает: http://127.0.0.1:8765"

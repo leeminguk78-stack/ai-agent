@@ -12,7 +12,7 @@ import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.4"
+VERSION = "0.4.1"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"
@@ -513,7 +513,8 @@ class H(BaseHTTPRequestHandler):
                 after = 0
             with LOCK:
                 entries = [e for e in LOG if e["seq"] > after]
-            return send(self, 200, {"entries": entries, "busy": BUSY["on"], "engine": cfg["engine"]})
+            return send(self, 200, {"entries": entries, "busy": BUSY["on"], "engine": cfg["engine"],
+                                   "version": VERSION})
         if path == "/api/files":
             return send(self, 200, {"files": files_list()})
         if path.startswith("/preview/"):

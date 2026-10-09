@@ -13,6 +13,7 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -72,6 +73,8 @@ public class MainActivity extends Activity {
         ws.setDomStorageEnabled(true);
         web.addJavascriptInterface(new Bridge(), "AgentApp");
         web.setWebViewClient(new Client());
+        // без WebChromeClient WebView молча отключает alert()/confirm() — включаем стандартные диалоги
+        web.setWebChromeClient(new WebChromeClient());
 
         pendingShare = sharedText(getIntent());
         if (state == null || web.restoreState(state) == null) {

@@ -15,9 +15,15 @@ concurrency:
   group: android-apk
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash     # bash -eo pipefail: любая ошибка останавливает сборку
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      KEYSTORE: /home/runner/agent-signing/agent.keystore
     steps:
       - uses: actions/checkout@v4
 
@@ -30,25 +36,40 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
-      # Ключ подписи хранится в кэше Actions, а не в публичном репозитории.
+      # Постоянный ключ подписи хранится в кэше Actions, а не в публичном репозитории.
       # Один и тот же ключ = каждое обновление ставится поверх старой версии.
-      - name: Ключ подписи
+      - name: Ключ подписи из кэша
+        id: key
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: android-signing-key-v1
+          path: /home/runner/agent-signing/agent.keystore
+          key: agent-signing-key-v1
+
+      - name: Создать ключ, если его ещё нет
+        if: steps.key.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$(dirname "$KEYSTORE")"
+          keytool -genkeypair -keystore "$KEYSTORE" -storetype PKCS12 -alias agent \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass agent-app -keypass agent-app \
+            -dname "CN=AI Agent, O=leeminguk78-stack"
 
       - name: Сборка APK
         working-directory: android-app
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: AGENT_KEYSTORE="$KEYSTORE" gradle assembleDebug --no-daemon --stacktrace
 
       - name: Публикация в релизы
         env:
           GH_TOKEN: ${{ github.token }}
+          KEY_SOURCE: ${{ steps.key.outputs.cache-hit == 'true' && 'из кэша' || 'создан заново' }}
         run: |
           cp android-app/app/build/outputs/apk/debug/app-debug.apk agent.apk
-          FP=$(keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep 'SHA256:' | head -1 | awk '{print $2}')
+          FP=$(keytool -list -v -keystore "$KEYSTORE" -storepass agent-app -alias agent | awk '/SHA256:/ && !f {print $2; f=1}')
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          SIG=$("$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs agent.apk | awk '/SHA-256/ && !f {print $NF; f=1}')
           gh release create "apk-${{ github.run_number }}" agent.apk \
             --title "Агент APK #${{ github.run_number }}" \
-            --notes "Сборка из коммита ${GITHUB_SHA::7}. Отпечаток ключа подписи: ${FP}" \
+            --notes "Сборка из коммита ${GITHUB_SHA::7}.
+          Ключ подписи: ${KEY_SOURCE}, SHA-256 ${FP}
+          Подпись APK: ${SIG}" \
             --latest

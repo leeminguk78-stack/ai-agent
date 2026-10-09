@@ -11,12 +11,12 @@
   Превью:      http://127.0.0.1:8766/<путь внутри workspace>/
 Код живёт в ~/agent-app (git), данные — в ~/agent (настройки, журнал, проекты, бэкапы).
 """
-import json, os, re, shlex, shutil, signal, tarfile, threading, subprocess, mimetypes, time
+import calendar, json, os, queue, re, shlex, shutil, signal, tarfile, threading, subprocess, mimetypes, time
 import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.7.2"
+VERSION = "0.8"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"
@@ -481,15 +481,37 @@ def why(e):
     return f"⛔ {NAME[e]} на лимите" + (f" ({m})" if m else "")
 
 
-def set_usage(e, wins):
-    if wins:
-        STATE.setdefault("usage", {})[e] = wins
-        jsave(STATEF, STATE)
+def set_usage(e, wins, full=False):
+    """Запомнить расход лимита по окнам [{"w": "5 ч", "pct": 40, "reset": время сброса}].
+    full=True — полные свежие данные (опрос): по ним же ставим или снимаем отметку «лимит исчерпан»."""
+    if not wins:
+        return
+    old = STATE.setdefault("usage", {}).get(e)
+    old = old.get("w", []) if isinstance(old, dict) else []
+    merged = {w["w"]: w for w in old}
+    merged.update({w["w"]: w for w in wins})
+    STATE["usage"][e] = {"t": int(time.time()), "w": sorted(merged.values(), key=lambda w: w["w"] != "5 ч")}
+    if full:
+        full_w = [w for w in wins if w["pct"] >= 100]
+        if full_w:
+            w = max(full_w, key=lambda x: x.get("reset") or 0)
+            mark_limit(e, f"лимит «{w['w']}» исчерпан", w.get("reset") or 0)
+        else:
+            clear_limit(e)
+    jsave(STATEF, STATE)
 
 
 def usage(e):
-    """Расход лимита по окнам: [{"w": "5 ч", "pct": 40, "reset": время}]; окна, которые уже сбросились, не показываем."""
-    return [w for w in STATE.get("usage", {}).get(e, []) if (w.get("reset") or 0) > time.time()]
+    """Расход лимита по окнам; окно, время сброса которого прошло, считаем обнулившимся."""
+    u = STATE.get("usage", {}).get(e)
+    wins = u.get("w", []) if isinstance(u, dict) else []
+    now = time.time()
+    return [dict(w, pct=0, reset=0) if 0 < (w.get("reset") or 0) <= now else dict(w) for w in wins]
+
+
+def usage_time(e):
+    u = STATE.get("usage", {}).get(e)
+    return u.get("t", 0) if isinstance(u, dict) else 0
 
 
 def cc_rate(info, res):
@@ -553,17 +575,178 @@ def cx_usage(rl):
     return wins
 
 
+# ---------- свежий расход лимитов: опрос без траты лимитов ----------
+UREF = {"on": False, "t": 0.0, "err": {}, "skip": set()}   # идёт ли опрос, когда был последний, ошибки, пропуски
+MONTHS = {m: i for i, m in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
+RESET_RE = re.compile(r"(?:([A-Z][a-z]{2}) (\d{1,2}),(?: (\d{4}),)? )?(\d{1,2})(?::(\d{2}))?\s?([ap]m)"
+                      r"(?: \(([^)]*)\))?", re.I)
+CC_USAGE_RE = re.compile(r"^(Current session|Current week \(all models\)):\s*(\d+)% used(?:\s*·\s*resets (.+))?$", re.M)
+
+
+def parse_reset(s):
+    """«Oct 10, 3:50am (UTC)» → время Unix. Claude Code печатает время в поясе TZ — запускаем его с TZ=UTC."""
+    m = RESET_RE.search(s or "")
+    if not m:
+        return 0
+    mon, day, year, hh, mm, ap, tz = m.groups()
+    if tz and tz.strip().upper() not in ("UTC", "ETC/UTC", "GMT", "ETC/GMT"):
+        return 0                                  # пояс не UTC — не гадаем
+    now = time.time()
+    g = time.gmtime(now)
+    h = int(hh) % 12 + (12 if ap.lower() == "pm" else 0)
+    if mon:
+        y, mo = int(year) if year else g.tm_year, MONTHS.get(mon.title(), g.tm_mon)
+        t = calendar.timegm((y, mo, int(day), h, int(mm or 0), 0))
+        if not year and t < now - 86400:          # «Jan 2» в конце декабря — это уже следующий год
+            t = calendar.timegm((y + 1, mo, int(day), h, int(mm or 0), 0))
+    else:
+        t = calendar.timegm((g.tm_year, g.tm_mon, g.tm_mday, h, int(mm or 0), 0))
+        if t < now:
+            t += 86400
+    return t
+
+
+def probe_claude():
+    """Claude Code: `claude -p /usage` — встроенная команда, к модели не обращается."""
+    r = subprocess.run(proot_cmd("claude", cc_script("export TZ=UTC; "), ["-p", "/usage", "--output-format", "json"]),
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace", timeout=90)
+    text = r.stdout
+    for chunk in [r.stdout] + r.stdout.splitlines():
+        try:
+            ev = json.loads(chunk)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and isinstance(ev.get("result"), str):
+            text = ev["result"]
+            break
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+    wins = [{"w": "5 ч" if m.group(1) == "Current session" else "неделя", "pct": int(m.group(2)),
+             "reset": parse_reset(m.group(3))} for m in CC_USAGE_RE.finditer(text)]
+    if not wins:
+        # непонятный ответ: сами больше не опрашиваем (вдруг команда ушла модели и тратит лимит) — только по кнопке ⟳
+        UREF["skip"].add("claude")
+        raise RuntimeError("Claude Code не показал расход лимитов" +
+                           (f": {first_line(text.strip() or r.stderr)}" if (text.strip() or r.stderr) else ""))
+    UREF["skip"].discard("claude")
+    set_usage("claude", wins, full=True)
+
+
+def probe_codex():
+    """Codex: `codex app-server` → запрос account/rateLimits/read (так лимиты читают расширения Codex)."""
+    p = subprocess.Popen(proot_cmd("codex", cx_script(), ["app-server"]), stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace",
+                         start_new_session=True)
+    lines = queue.Queue()
+
+    def reader():
+        for line in p.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def send(msg):
+        p.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        p.stdin.flush()
+
+    def answer(i, deadline):
+        while True:
+            try:
+                line = lines.get(timeout=max(0.1, deadline - time.time()))
+            except queue.Empty:
+                raise RuntimeError("Codex не ответил вовремя")
+            if line is None:
+                raise RuntimeError("Codex завершился, не сообщив лимиты")
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(m, dict) and m.get("id") == i:
+                if m.get("error"):
+                    err = m["error"]
+                    raise RuntimeError(str(err.get("message") if isinstance(err, dict) else err))
+                return m.get("result") or {}
+
+    try:
+        deadline = time.time() + 60
+        send({"method": "initialize", "id": 0,
+              "params": {"clientInfo": {"name": "ai_agent", "title": "ИИ-агент (Termux)", "version": VERSION}}})
+        answer(0, deadline)
+        send({"method": "initialized", "params": {}})
+        send({"method": "account/rateLimits/read", "id": 1, "params": {"excludeResetCreditDetails": True}})
+        rl = answer(1, deadline).get("rateLimits") or {}
+    finally:
+        try:
+            p.stdin.close()
+        except OSError:
+            pass
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            kill_proc(p)
+    wins = cx_usage({k: {"used_percent": w.get("usedPercent"), "window_minutes": w.get("windowDurationMins"),
+                         "resets_at": w.get("resetsAt")}
+                     for k, w in rl.items() if k in ("primary", "secondary") and isinstance(w, dict)})
+    if not wins:
+        raise RuntimeError("Codex не сообщил расход лимитов")
+    set_usage("codex", wins, full=True)
+
+
+def refresh_usage(force=False, manual=False):
+    """Свежий расход лимитов обеих подписок — в фоне; сам по себе не чаще раза в 10 минут.
+    force — сразу (после задачи), manual — по кнопке ⟳ (опрашиваем даже то, что отключили)."""
+    if UREF["on"] or (not (force or manual) and time.time() - UREF["t"] < 600):
+        return
+    UREF["on"] = True
+
+    def one(e, probe):
+        try:
+            probe()
+            UREF["err"].pop(e, None)
+        except Exception as ex:
+            UREF["err"][e] = first_line(str(ex)) or type(ex).__name__
+
+    def work():
+        try:
+            ts = [threading.Thread(target=one, args=(e, pr), daemon=True)
+                  for e, pr in (("claude", probe_claude), ("codex", probe_codex))
+                  if installed(e) is not False and (manual or e not in UREF["skip"])]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(120)
+        finally:
+            UREF.update(on=False, t=time.time())
+
+    threading.Thread(target=work, daemon=True).start()
+
+
 # ---------- запуск движка в Ubuntu ----------
 def new_res(e):
     return {"engine": e, "ok": False, "text": "", "error": "", "limit": False, "limit_until": 0, "limit_seen": False,
             "stopped": False, "timeout": False, "session": None, "model": "", "turns": None, "tail": []}
 
 
-def launch(prog, script, args, ws, res):
-    """Запуск CLI движка в Ubuntu (proot): в /workspace он видит только папку ws."""
+def proot_cmd(prog, script, args, ws=WSR):
+    """Команда запуска программы в Ubuntu (proot): в /workspace она видит только папку ws."""
     c = cfg["claude"]                       # Ubuntu одна на оба движка
     cmd = ["proot-distro", "login", c["distro"]] + (["--isolated"] if c.get("isolated", True) else [])
-    cmd += ["--bind", f"{ws}:/workspace", "--", "bash", "-c", script, prog] + args
+    return cmd + ["--bind", f"{ws}:/workspace", "--", "bash", "-c", script, prog] + args
+
+
+def cc_script(env=""):
+    return (f"{env}export BASH_DEFAULT_TIMEOUT_MS=900000 BASH_MAX_TIMEOUT_MS=900000; "
+            f'cd /workspace && exec {shlex.quote(cfg["claude"]["bin"])} "$@"')
+
+
+def cx_script(env=""):
+    return (f'{env}export PATH="/root/.local/bin:/usr/local/bin:$PATH"; '
+            f'cd /workspace && exec {shlex.quote(cfg["codex"].get("bin") or "codex")} "$@"')
+
+
+def launch(prog, script, args, ws, res):
+    """Запуск движка в Ubuntu: вывод (stdout+stderr) читаем построчно."""
+    cmd = proot_cmd(prog, script, args, ws)
     try:
         return subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, errors="replace", start_new_session=True)
@@ -626,8 +809,7 @@ def conclude(e, p, res):
 # ---------- движок: Claude Code ----------
 def run_claude(prompt, ws=WSR, sid=None, save=True, tag=""):
     c, res = cfg["claude"], new_res("claude")
-    script = ("export BASH_DEFAULT_TIMEOUT_MS=900000 BASH_MAX_TIMEOUT_MS=900000; "
-              f'cd /workspace && exec {shlex.quote(c["bin"])} "$@"')
+    script = cc_script()
     args = ["-p", argsafe(prompt), "--output-format", "stream-json", "--verbose",
             "--permission-mode", "acceptEdits", "--allowedTools", c["tools"],
             "--permission-prompts", "none", "--append-system-prompt", ENGINE_PROMPT]
@@ -742,8 +924,7 @@ def cx_step(it, kw):
 
 def run_codex(prompt, ws=WSR, sid=None, save=True, tag=""):
     c, res = cfg["codex"], new_res("codex")
-    script = ('export PATH="/root/.local/bin:/usr/local/bin:$PATH"; '
-              f'cd /workspace && exec {shlex.quote(c.get("bin") or "codex")} "$@"')
+    script = cx_script()
     # Песочницу Codex не включаем: её роль играет proot --isolated (виден только /workspace)
     args = ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
             "-c", "developer_instructions=" + json.dumps(ENGINE_PROMPT, ensure_ascii=False)]
@@ -1076,12 +1257,11 @@ def engine_info():
                 "model": p.get("model", ""), "model_set": p.get("model", ""), "warn": "" if ready else "настрой в ⚙"}
         used = []
     lim = STATE.get("limits", {})
-    watch = used + ([other(e)] if e in SUBS and cfg.get("fallback", True) else [])   # резерв тоже важен
-    info["limits"] = [{"name": NAME[x], "until": lim[x]["until"], "exact": lim[x].get("exact", False)}
-                      for x in watch if limited(x)]
-    info["high"] = [{"name": NAME[x], "pct": max(w["pct"] for w in usage(x))}
-                    for x in used if not limited(x) and usage(x) and max(w["pct"] for w in usage(x)) >= 80]
-    info["usage"] = {NAME[x]: usage(x) for x in SUBS if usage(x)}
+    info["usage"] = [{"id": x, "name": NAME[x], "active": x in used, "w": usage(x), "t": usage_time(x),
+                      "until": lim[x]["until"] if limited(x) else 0, "exact": bool(lim.get(x, {}).get("exact")),
+                      "err": UREF["err"].get(x, "")}
+                     for x in SUBS if installed(x) is not False]
+    info["usage_busy"] = UREF["on"]
     return info
 
 
@@ -1105,6 +1285,8 @@ def start_job(msg):
             log("err", f"{type(e).__name__}: {e}")
         finally:
             BUSY.update(on=False, proc=None, phase="", doing="")
+            if mode != "api":
+                refresh_usage(force=True)          # свежий расход лимитов после задачи
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -1176,6 +1358,8 @@ class H(BaseHTTPRequestHandler):
                 after = 0
             with LOCK:
                 entries = [e for e in LOG if e["seq"] > after]
+            if not BUSY["on"]:
+                refresh_usage()                     # пульт открыт — раз в 10 минут обновляем лимиты
             return send(self, 200, {"entries": entries, "busy": BUSY["on"], "engine": cfg["engine"],
                                    "version": VERSION, "info": engine_info(), "phase": BUSY["phase"],
                                    "doing": BUSY["doing"],
@@ -1218,6 +1402,9 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/config":
             update_cfg(data)
             return send(self, 200, public_cfg())
+        if self.path == "/api/usage":
+            refresh_usage(manual=True)
+            return send(self, 200, {"ok": True})
         if self.path == "/api/reset":
             if BUSY["on"]:
                 return send(self, 409, {"error": "Сначала останови текущую задачу (⏹)"})

@@ -49,7 +49,21 @@ textarea{flex:1;resize:none;background:var(--bg);color:var(--fg);border:1px soli
 #set details.how pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0;white-space:pre-wrap;color:var(--fg);font:13px/1.45 ui-monospace,monospace;user-select:all}
 #set .save{position:sticky;bottom:0;background:var(--panel);padding:10px 0 12px;margin:0;border-top:1px solid var(--line)}
 #ver{color:var(--mut);font-size:12px}
-#usage{white-space:pre-line}
+#lims{display:flex;flex-direction:column;gap:5px;padding:5px 12px 7px;background:#14171d;border-bottom:1px solid var(--line);font-size:12px;color:var(--mut);cursor:pointer}
+#lims:empty{display:none}
+.lrow{display:flex;align-items:center;gap:8px}
+.lname{width:50px;flex:none;color:#c9cede;font-weight:600}
+.lname.on{color:var(--acc)}
+.lbars{flex:1 1 auto;max-width:480px;display:flex;flex-direction:column;gap:2px;min-width:50px}
+.lbar{display:block;height:7px;background:#262b36;border-radius:4px;overflow:hidden}
+.lbar.wk{height:3px}
+.lbar i{display:block;height:100%;width:0;border-radius:4px;transition:width .4s}
+.ltxt{flex:none;white-space:nowrap;min-width:9.5em}
+.ltxt.bad{color:#ff9b9b}
+#limd{display:none;padding:8px 12px 10px;background:#14171d;border-bottom:1px solid var(--line);font-size:13px;color:var(--mut)}
+#limtxt div{margin-bottom:8px}
+#limtxt b{color:var(--fg);font-weight:600}
+#limtxt p{margin:2px 0 0 12px}
 #info{display:flex;flex-wrap:wrap;gap:5px 8px;align-items:center;padding:6px 12px;background:#14171d;border-bottom:1px solid var(--line);font-size:13px;color:var(--mut)}
 #info b{color:var(--fg);font-weight:600}
 #info .chip{background:#262b36;border-radius:999px;padding:1px 9px;color:#c9cede}
@@ -63,7 +77,9 @@ a{color:var(--acc)}
 <header><b>🤖 Агент</b>
 <select id="eng" onchange="setEng()"><option value="claude">Claude Code</option><option value="codex">Codex</option><option value="duo">Тандем</option><option value="api">API-модель</option></select>
 <button onclick="files()">📁</button><button onclick="backup()">💾</button><button id="rst" onclick="reset()">🗑</button><button onclick="toggleSet()">⚙</button></header>
-<div id="info" onclick="toggleSet()"><span id="iDot"></span><b id="iEng">…</b><span id="iModel" class="chip"></span><span id="iVia" class="chip"></span><span id="iLim" class="chip lim"></span><span id="iState"></span></div>
+<div id="info" onclick="toggleSet()"><span id="iDot"></span><b id="iEng">…</b><span id="iModel" class="chip"></span><span id="iVia" class="chip"></span><span id="iState"></span></div>
+<div id="lims" onclick="toggleLims()" title="Лимиты подписок: нажми для подробностей"></div>
+<div id="limd"><p class="hint" style="margin:0 0 8px">Шкала показывает, сколько израсходовано: толстая — 5-часовая сессия, тонкая — неделя.</p><div id="limtxt"></div><button id="limbtn" onclick="refreshLims()">⟳ Обновить</button></div>
 <div id="off">⚠️ Нет связи с агентом. <span id="offcmd">Запусти в Termux: <code>bash ~/agent-app/start.sh</code></span><button id="offbtn" onclick="AgentApp.startAgent()">▶ Запустить</button> <span id="st"></span></div>
 <div id="set">
 <h4>Claude Code</h4>
@@ -88,7 +104,7 @@ a{color:var(--acc)}
 <label>Проверок за задачу</label><select id="duoR"><option value="1">1 — проверка и исправление</option><option value="2">2 — плюс повторная проверка</option></select>
 <h4>Резерв</h4>
 <label class="chk"><input type="checkbox" id="fb"> Кончился лимит у одного ИИ — задачу продолжит другой</label>
-<p id="usage" class="hint"></p>
+<p class="hint">Расход лимитов обеих подписок — на шкалах под строкой движка (нажми на них для подробностей).</p>
 <h4>API-модель</h4>
 <p class="hint">Запасной движок: Gemini или OpenRouter по API-ключу, либо локальная модель Ollama. Работает с файлами в Termux, но не собирает APK.</p>
 <label>Провайдер</label><select id="prov" onchange="fill()"></select>
@@ -145,13 +161,32 @@ function renderInfo(j){const i=j.info||{};$('#iEng').textContent=i.label||'';
 $('#iModel').textContent=i.engine=='duo'?'✍ '+i.author+' · 🔍 '+i.reviewer:
  i.model?prettyModel(i.model):(i.engine=='api'?'модель не выбрана':'модель по умолчанию');
 $('#iVia').textContent=i.via||'';
-$('#iLim').textContent=(i.limits||[]).map(x=>'⛔ '+x.name+(x.exact?' до '+hhmm(x.until):': лимит')).concat((i.high||[]).map(x=>'⚠ '+x.name+' '+x.pct+'%')).join(' · ');
 let st='готов',col='#3ecf8e';
 if(j.busy){st='⏳ '+(j.phase||'работает')+' · '+fmt(j.elapsed||0);col='#f5b84a'}else if(i.warn){st='⚠ '+i.warn;col='#e5534b'}
 $('#iState').textContent=st;$('#iDot').style.background=col;
 $('#wdo').textContent='⏳ '+(j.doing?'сейчас: '+j.doing:'агент работает…');
-const u=i.usage||{},ln=Object.keys(u).map(n=>n+' — '+u[n].map(w=>w.w+': '+w.pct+'% (сброс '+hhmm(w.reset)+')').join(', '));
-$('#usage').textContent=ln.length?'Расход лимитов:\n'+ln.join('\n'):''}
+renderLims(i)}
+// Шкалы лимитов: заполнение = израсходовано; цвет — по остатку
+let ubusy=false,lastUsage=[];
+function gcol(left){return left<15?'#e5534b':left<40?'#f5b84a':'#3ecf8e'}
+function ago(t){const s=Date.now()/1000-t;return s<60?'только что':s<3600?Math.floor(s/60)+' мин назад':Math.floor(s/3600)+' ч назад'}
+function renderLims(i){const box=$('#lims'),det=$('#limtxt'),us=i.usage||[];ubusy=!!i.usage_busy;lastUsage=us;box.innerHTML='';det.innerHTML='';
+us.forEach(u=>{const s=u.w.find(w=>w.w=='5 ч')||u.w[0],wk=u.w.find(w=>w.w=='неделя'&&w!==s);
+ const row=el('div','lrow'),bars=el('span','lbars'),txt=el('span','ltxt');
+ [[s,''],[wk,' wk']].forEach(([w,c])=>{const b=el('span','lbar'+c),f=el('i');
+  if(w){f.style.width=Math.min(100,w.pct)+'%';f.style.background=w.pct>=100||(u.until&&!c)?'#e5534b':gcol(100-w.pct)}b.append(f);bars.append(b)});
+ if(u.until){txt.textContent='⛔ лимит'+(u.exact?' до '+hhmm(u.until):'');txt.classList.add('bad')}
+ else if(s)txt.textContent=s.pct+'% · осталось '+Math.max(0,100-s.pct)+'%';
+ else txt.textContent=ubusy?'узнаю…':(u.err?'⚠ нет данных':'нет данных');
+ row.append(el('span','lname'+(u.active?' on':''),u.name),bars,txt);box.append(row);
+ const d=el('div');d.append(el('b',null,u.name),u.until?' — ⛔ лимит исчерпан'+(u.exact?', до '+hhmm(u.until):''):'');
+ u.w.forEach(w=>d.append(el('p',null,(w.w=='5 ч'?'сессия (5 ч)':w.w)+': использовано '+w.pct+'%, осталось '+Math.max(0,100-w.pct)+'%'+(w.reset?', сброс '+hhmm(w.reset):''))));
+ if(!u.w.length)d.append(el('p',null,'нет данных'));if(u.t)d.append(el('p',null,'обновлено '+ago(u.t)));if(u.err)d.append(el('p',null,'⚠ '+u.err));det.append(d)});
+const b=$('#limbtn');b.disabled=ubusy;b.textContent=ubusy?'⏳ обновляю…':'⟳ Обновить'}
+function toggleLims(){const d=$('#limd'),open=d.style.display!='block';d.style.display=open?'block':'none';
+if(open&&lastUsage.some(u=>!u.t||Date.now()/1000-u.t>300))refreshLims()}
+async function refreshLims(){if(ubusy)return;ubusy=true;$('#limbtn').disabled=true;$('#limbtn').textContent='⏳ обновляю…';
+await api('/api/usage',{});setTimeout(poll,1500)}
 function setBusy(b){busy=b;$('#send').textContent=b?'⏹':'➤';$('#wait').style.display=b?'block':'none'}
 async function poll(){clearTimeout(timer);
 try{const j=await api('/api/log?after='+last);$('#off').style.display='none';
@@ -161,7 +196,7 @@ j.entries.forEach(e=>{render(e);last=e.seq});if(j.entries.length&&down)log.scrol
 setBusy(j.busy);renderInfo(j);if(j.engine&&$('#eng').value!=j.engine)$('#eng').value=j.engine;
 if(j.version&&C.version&&j.version!==C.version){location.reload();return}}
 catch(e){$('#off').style.display='block';$('#iState').textContent='нет связи';$('#iDot').style.background='#e5534b'}
-timer=setTimeout(poll,busy?1500:6000)}
+timer=setTimeout(poll,busy||ubusy?1500:6000)}
 async function send(){if(busy){await api('/api/stop',{});poll();return}
 const t=$('#inp').value.trim();if(!t)return;$('#inp').value='';
 const j=await api('/api/chat',{message:t});if(j.error)render({t:'err',text:j.error});else setBusy(true);

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ИИ-агент-разработчик для Termux — v0.4
+ИИ-агент-разработчик для Termux — v0.5
 Движки: Claude Code (подписка, через proot Ubuntu) и API-модели (Gemini/OpenRouter/Ollama).
 Только стандартная библиотека Python.
   Пульт (PWA): http://127.0.0.1:8765
@@ -12,7 +12,7 @@ import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.4.1"
+VERSION = "0.5"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"
@@ -23,9 +23,10 @@ for d in (WS, BK):
 WSR = WS.resolve()
 APP = Path(__file__).resolve().parent
 STATIC = APP / "static"                 # страница пульта, манифест PWA, service worker, иконки
+KIT = APP / "kit"                       # правила (AGENTS.md) и инструменты движков: копируются в workspace
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 mimetypes.add_type("text/javascript", ".js")
-SKIP = {"node_modules", ".git", "build", ".gradle", "__pycache__"}
+SKIP = {"node_modules", ".git", "build", ".gradle", "__pycache__", ".agent", ".apps-repo"}
 MAX_READ, MAX_OUT = 20000, 6000
 
 DEFAULT_CFG = {
@@ -113,6 +114,20 @@ def log(kind, text="", **kw):
         LOG.append(dict(seq=SEQ, t=kind, text=str(text)[:20000], **kw))
         del LOG[:-300]
         jsave(LOGF, LOG)
+
+
+def sync_kit():
+    """Правила для движков (AGENTS.md) и инструменты (.agent/) — свежие при каждом запуске агента."""
+    if not KIT.is_dir():
+        return
+    try:
+        shutil.copy2(KIT / "AGENTS.md", WS / "AGENTS.md")
+        if not (WS / "CLAUDE.md").exists():       # Claude Code читает CLAUDE.md, Codex — AGENTS.md
+            (WS / "CLAUDE.md").write_text("@AGENTS.md\n\n# Заметки пользователя\n")
+        shutil.copytree(KIT / ".agent", WS / ".agent", dirs_exist_ok=True)
+        os.chmod(WS / ".agent" / "apk.sh", 0o755)
+    except Exception as e:
+        print("Не удалось обновить набор агента (kit):", e)
 
 
 # ---------- инструменты (для API-моделей) ----------
@@ -316,6 +331,7 @@ CC_PROMPT = (f"Ты работаешь на Android-телефоне: Ubuntu (pr
              f"Превью уже работает: пользователь открывает сайт по адресу http://127.0.0.1:{PPORT}/sites/<имя>/ — "
              f"давай эту ссылку в ответе. Не запускай серверы и другие долгие фоновые процессы. "
              f"После изменений проверяй результат и исправляй ошибки. "
+             f"Подробные правила (в том числе сборка Android-приложений) — в /workspace/AGENTS.md, следуй им. "
              f"Отвечай по-русски кратко: что сделано, где файлы, как проверить.")
 
 
@@ -344,6 +360,7 @@ def run_claude(msg):
     c = cfg["claude"]
     cmd = ["proot-distro", "login", c["distro"]] + (["--isolated"] if c.get("isolated", True) else [])
     cmd += ["--bind", f"{WSR}:/workspace", "--", "bash", "-c",
+            "export BASH_DEFAULT_TIMEOUT_MS=900000 BASH_MAX_TIMEOUT_MS=900000; "
             f'cd /workspace && exec {shlex.quote(c["bin"])} "$@"', "claude",
             "-p", msg, "--output-format", "stream-json", "--verbose",
             "--permission-mode", "acceptEdits", "--allowedTools", c["tools"],
@@ -571,6 +588,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    sync_kit()
     if not (STATIC / "index.html").is_file():
         raise SystemExit(f"Не найдена папка {STATIC} — запускай agent.py из папки репозитория ai-agent.")
     if not shutil.which("proot-distro"):

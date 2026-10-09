@@ -1,0 +1,123 @@
+# Сборка Android-приложений ИИ-агента. Файл обновляется агентом автоматически.
+name: Build apps
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/**", "template/**"]
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "id приложения (папка apps/<id>); пусто — собрать все"
+        required: false
+        default: ""
+
+permissions:
+  contents: write   # публикация APK в релизы
+
+concurrency:
+  group: build-apps
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE: /home/runner/apps-signing/apps.keystore
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Какие приложения собирать
+        id: list
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_APP: ${{ inputs.app }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          ALL=$(ls apps 2>/dev/null || true)
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            APPS="${INPUT_APP:-$ALL}"
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            APPS="$ALL"
+          elif [ -n "$(git diff --name-only "$BEFORE" HEAD -- template)" ]; then
+            APPS="$ALL"            # изменилась оболочка — пересобрать всё
+          else
+            APPS=$(git diff --name-only "$BEFORE" HEAD -- apps | cut -d/ -f2 | sort -u)
+          fi
+          APPS=$(echo $APPS)
+          echo "apps=$APPS" >> "$GITHUB_OUTPUT"
+          echo "Собираю: ${APPS:-ничего}"
+
+      - uses: actions/setup-java@v4
+        if: steps.list.outputs.apps != ''
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.list.outputs.apps != ''
+        with:
+          gradle-version: "8.10.2"
+
+      # Постоянный ключ подписи живёт в кэше Actions (не в репозитории):
+      # обновления каждого приложения ставятся поверх старой версии.
+      - name: Ключ подписи из кэша
+        id: key
+        if: steps.list.outputs.apps != ''
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/apps-signing/apps.keystore
+          key: apps-signing-key-v1
+
+      - name: Создать ключ, если его ещё нет
+        if: steps.list.outputs.apps != '' && steps.key.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$(dirname "$KEYSTORE")"
+          keytool -genkeypair -keystore "$KEYSTORE" -storetype PKCS12 -alias apps \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass agent-apps -keypass agent-apps -dname "CN=AI Agent Apps"
+
+      - name: Сборка и публикация
+        if: steps.list.outputs.apps != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPS: ${{ steps.list.outputs.apps }}
+          RUN_NO: ${{ github.run_number }}
+        run: |
+          for id in $APPS; do
+            if [[ ! "$id" =~ ^[a-z][a-z0-9_]*$ ]]; then echo "::error::Неверный id приложения: $id"; exit 1; fi
+            if [ ! -f "apps/$id/www/index.html" ]; then echo "Нет apps/$id/www/index.html — пропускаю"; continue; fi
+            NAME=$(jq -r '.name // empty' "apps/$id/app.json" 2>/dev/null || true)
+            THEME=$(jq -r '.theme // empty' "apps/$id/app.json" 2>/dev/null || true)
+            COLOR=$(jq -r '.color // empty' "apps/$id/app.json" 2>/dev/null || true)
+            [[ "$COLOR" =~ ^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$ ]] || COLOR="#ffffff"
+            [ "$THEME" = "dark" ] || THEME="light"
+            echo "::group::$id — ${NAME:-$id}"
+            B="$RUNNER_TEMP/build-$id"
+            rm -rf "$B" && cp -r template "$B"
+            rm -rf "$B/app/src/main/assets/www" && mkdir -p "$B/app/src/main/assets"
+            cp -r "apps/$id/www" "$B/app/src/main/assets/www"
+            if [ -f "apps/$id/www/icon.png" ]; then
+              rm -f "$B"/app/src/main/res/mipmap-*/ic_launcher.png
+              mkdir -p "$B/app/src/main/res/mipmap-xxxhdpi"
+              cp "apps/$id/www/icon.png" "$B/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
+            fi
+            (cd "$B" && APP_ID="$id" APP_NAME="${NAME:-$id}" APP_THEME="$THEME" APP_COLOR="$COLOR" \
+               AGENT_KEYSTORE="$KEYSTORE" GITHUB_RUN_NUMBER="$RUN_NO" gradle assembleDebug --no-daemon --stacktrace)
+            cp "$B/app/build/outputs/apk/debug/app-debug.apk" "$id.apk"
+            NOTES="Сборка №$RUN_NO из коммита ${GITHUB_SHA::7}"
+            if gh release view "$id" >/dev/null 2>&1; then
+              gh release upload "$id" "$id.apk" --clobber
+              gh release edit "$id" --title "${NAME:-$id}" --notes "$NOTES"
+            else
+              gh release create "$id" "$id.apk" --title "${NAME:-$id}" --notes "$NOTES"
+            fi
+            echo "::endgroup::"
+            echo "APK_URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/$id/$id.apk"
+          done

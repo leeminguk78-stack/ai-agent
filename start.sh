@@ -11,6 +11,7 @@ fi
 command -v termux-wake-lock >/dev/null && termux-wake-lock   # не даём Android усыпить Termux
 mkdir -p ~/agent
 nohup python -u "$DIR/agent.py" > ~/agent/server.log 2>&1 &
+echo $! > ~/agent/agent.pid               # номер процесса — для точной остановки
 
 for _ in $(seq 1 15); do
   sleep 1

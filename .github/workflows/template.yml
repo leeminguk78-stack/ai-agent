@@ -1,0 +1,47 @@
+# Проверка шаблона Android-приложений из kit/: собирается ли APK с тестовым приложением.
+name: Template check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "kit/.agent/android-template/**"
+      - "kit/.agent/apps-workflow.yml"
+      - ".github/workflows/template.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Сборка шаблона с тестовым приложением
+        run: |
+          B="$RUNNER_TEMP/demo"
+          cp -r kit/.agent/android-template "$B"
+          rm -rf "$B/app/src/main/assets/www" && mkdir -p "$B/app/src/main/assets/www"
+          printf '<!doctype html><meta charset="utf-8"><title>Тест</title><script type="module" src="app.js"></script><h1>Тест</h1>' \
+            > "$B/app/src/main/assets/www/index.html"
+          echo 'document.body.append("ok")' > "$B/app/src/main/assets/www/app.js"
+          # своя иконка, как в workflow приложений
+          rm -f "$B"/app/src/main/res/mipmap-*/ic_launcher.png
+          mkdir -p "$B/app/src/main/res/mipmap-xxxhdpi"
+          cp static/icon-512.png "$B/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
+          cd "$B"
+          APP_ID=demo_test APP_NAME="Тест «кавычки» & 'апостроф' \"двойные\"" APP_THEME=dark APP_COLOR="#112233" \
+            gradle assembleDebug --no-daemon --stacktrace
+          ls -l app/build/outputs/apk/debug/

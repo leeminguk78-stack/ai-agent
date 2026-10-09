@@ -23,11 +23,14 @@ REMOTE="${APPS_REMOTE:-https://github.com/$OWNER/$REPO.git}"
 git config --global user.name >/dev/null || git config --global user.name "$OWNER"
 git config --global user.email >/dev/null || git config --global user.email "$(gh api user --jq .id)+$OWNER@users.noreply.github.com"
 
-# 1. Репозиторий для приложений (создаётся один раз)
+# 1. Закрытый репозиторий для приложений (создаётся один раз)
 if ! gh repo view "$OWNER/$REPO" >/dev/null 2>&1; then
-  echo "Создаю репозиторий $OWNER/$REPO для приложений…"
-  gh repo create "$OWNER/$REPO" --public --description "Android-приложения, созданные ИИ-агентом" >/dev/null \
+  echo "Создаю закрытый репозиторий $OWNER/$REPO для приложений…"
+  gh repo create "$OWNER/$REPO" --private --description "Android-приложения, созданные ИИ-агентом" >/dev/null \
     || fail "не удалось создать репозиторий $OWNER/$REPO"
+elif [ "$(gh api "repos/$OWNER/$REPO" --jq .private 2>/dev/null)" = "false" ]; then
+  echo "Делаю репозиторий $OWNER/$REPO закрытым…"
+  gh api -X PATCH "repos/$OWNER/$REPO" -F private=true >/dev/null || echo "Не удалось сделать репозиторий закрытым — сделай это в настройках GitHub"
 fi
 
 # 2. Локальная копия — только «зеркало» для отправки: всегда приводим её к состоянию GitHub
@@ -90,6 +93,7 @@ done
 
 if [ "$S" = "completed success" ]; then
   echo "✓ APK готов"
+  echo "Репозиторий закрытый: ссылка скачивается в браузере, где выполнен вход в GitHub."
   echo "APK_URL=https://github.com/$OWNER/$REPO/releases/download/$ID/$ID.apk"
 else
   echo "✗ Сборка не удалась ($S). Журнал ошибки:"

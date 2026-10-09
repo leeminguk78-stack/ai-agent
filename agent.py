@@ -16,7 +16,7 @@ import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.8"
+VERSION = "0.8.1"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"
@@ -71,8 +71,14 @@ def jload(p, default):
 
 
 def jsave(p, data, private=False):
-    tmp = p.with_name(p.name + ".tmp")          # запись через временный файл — не портится при обрыве
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1 if private else None))
+    tmp = p.with_name(f"{p.name}.{threading.get_ident()}.tmp")   # через временный файл — не портится при обрыве
+    for _ in range(5):                          # данные могут меняться из другого потока прямо во время записи
+        try:
+            text = json.dumps(data, ensure_ascii=False, indent=1 if private else None)
+            break
+        except RuntimeError:
+            time.sleep(0.01)
+    tmp.write_text(text)
     if private:
         os.chmod(tmp, 0o600)
     tmp.replace(p)
@@ -135,7 +141,12 @@ SEQ = LOG[-1]["seq"] if LOG else 0
 STATE = jload(STATEF, {})
 STATE = STATE if isinstance(STATE, dict) else {}
 STATE.setdefault("synced", {"claude": SEQ})     # до v0.7 весь разговор вёл Claude
-LOCK, JOB_LOCK = threading.Lock(), threading.Lock()
+LOCK, JOB_LOCK, STATE_LOCK = threading.Lock(), threading.Lock(), threading.Lock()
+
+
+def save_state():
+    with STATE_LOCK:                            # состояние пишут задача, опрос лимитов и пульт
+        jsave(STATEF, STATE)
 # phase — кто чем занят («🔍 Codex проверяет»), doing — текущее действие («Bash ls»)
 BUSY = {"on": False, "stop": False, "proc": None, "started": 0, "phase": "", "doing": ""}
 
@@ -458,7 +469,7 @@ def mark_limit(e, msg, until=0):
     exact = bool(until) and until > time.time()
     STATE.setdefault("limits", {})[e] = {"until": int(until if exact else time.time() + 20 * 60),  # неизвестно — проверим через 20 мин
                                          "exact": exact, "msg": first_line(msg)}
-    jsave(STATEF, STATE)
+    save_state()
 
 
 def limited(e):
@@ -467,7 +478,7 @@ def limited(e):
 
 def clear_limit(e):
     if STATE.get("limits", {}).pop(e, None):
-        jsave(STATEF, STATE)
+        save_state()
 
 
 def usable(e):
@@ -487,7 +498,7 @@ def set_usage(e, wins, full=False):
     if not wins:
         return
     old = STATE.setdefault("usage", {}).get(e)
-    old = old.get("w", []) if isinstance(old, dict) else []
+    old = old.get("w", []) if isinstance(old, dict) else (old if isinstance(old, list) else [])
     merged = {w["w"]: w for w in old}
     merged.update({w["w"]: w for w in wins})
     STATE["usage"][e] = {"t": int(time.time()), "w": sorted(merged.values(), key=lambda w: w["w"] != "5 ч")}
@@ -498,13 +509,13 @@ def set_usage(e, wins, full=False):
             mark_limit(e, f"лимит «{w['w']}» исчерпан", w.get("reset") or 0)
         else:
             clear_limit(e)
-    jsave(STATEF, STATE)
+    save_state()
 
 
 def usage(e):
     """Расход лимита по окнам; окно, время сброса которого прошло, считаем обнулившимся."""
     u = STATE.get("usage", {}).get(e)
-    wins = u.get("w", []) if isinstance(u, dict) else []
+    wins = u.get("w", []) if isinstance(u, dict) else (u if isinstance(u, list) else [])   # список — формат v0.7
     now = time.time()
     return [dict(w, pct=0, reset=0) if 0 < (w.get("reset") or 0) <= now else dict(w) for w in wins]
 
@@ -576,7 +587,7 @@ def cx_usage(rl):
 
 
 # ---------- свежий расход лимитов: опрос без траты лимитов ----------
-UREF = {"on": False, "t": 0.0, "err": {}, "skip": set()}   # идёт ли опрос, когда был последний, ошибки, пропуски
+UREF = {"on": False, "t": time.time() - 590, "err": {}, "skip": set()}   # опрос: идёт ли, когда был (первый — через 10 с), ошибки, пропуски
 MONTHS = {m: i for i, m in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
 RESET_RE = re.compile(r"(?:([A-Z][a-z]{2}) (\d{1,2}),(?: (\d{4}),)? )?(\d{1,2})(?::(\d{2}))?\s?([ap]m)"
                       r"(?: \(([^)]*)\))?", re.I)
@@ -608,8 +619,16 @@ def parse_reset(s):
 
 def probe_claude():
     """Claude Code: `claude -p /usage` — встроенная команда, к модели не обращается."""
-    r = subprocess.run(proot_cmd("claude", cc_script("export TZ=UTC; "), ["-p", "/usage", "--output-format", "json"]),
-                       stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace", timeout=90)
+    p = subprocess.Popen(proot_cmd("claude", cc_script("export TZ=UTC; "), ["-p", "/usage", "--output-format", "json"]),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         errors="replace", start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=90)
+    except subprocess.TimeoutExpired:
+        kill_proc(p)                            # вся группа: proot, claude и их дети
+        p.communicate()
+        raise RuntimeError("Claude Code не ответил на /usage за 90 с")
+    r = subprocess.CompletedProcess(p.args, p.returncode, out, err)
     text = r.stdout
     for chunk in [r.stdout] + r.stdout.splitlines():
         try:
@@ -625,8 +644,10 @@ def probe_claude():
     if not wins:
         # непонятный ответ: сами больше не опрашиваем (вдруг команда ушла модели и тратит лимит) — только по кнопке ⟳
         UREF["skip"].add("claude")
-        raise RuntimeError("Claude Code не показал расход лимитов" +
-                           (f": {first_line(text.strip() or r.stderr)}" if (text.strip() or r.stderr) else ""))
+        print(f"[лимиты] ответ Claude Code на /usage (код {r.returncode}): {r.stdout[:1500]!r} stderr: {r.stderr[-500:]!r}",
+              flush=True)
+        raw = " ".join((text.strip() or r.stderr.strip()).split())
+        raise RuntimeError("Claude Code не показал расход лимитов" + (f": «{raw[:200]}»" if raw else ""))
     UREF["skip"].discard("claude")
     set_usage("claude", wins, full=True)
 
@@ -699,22 +720,17 @@ def refresh_usage(force=False, manual=False):
         return
     UREF["on"] = True
 
-    def one(e, probe):
-        try:
-            probe()
-            UREF["err"].pop(e, None)
-        except Exception as ex:
-            UREF["err"][e] = first_line(str(ex)) or type(ex).__name__
-
     def work():
         try:
-            ts = [threading.Thread(target=one, args=(e, pr), daemon=True)
-                  for e, pr in (("claude", probe_claude), ("codex", probe_codex))
-                  if installed(e) is not False and (manual or e not in UREF["skip"])]
-            for t in ts:
-                t.start()
-            for t in ts:
-                t.join(120)
+            for e, probe in (("claude", probe_claude), ("codex", probe_codex)):   # по очереди, а не разом
+                if installed(e) is False or (not manual and e in UREF["skip"]):
+                    continue
+                try:
+                    probe()
+                    UREF["err"].pop(e, None)
+                except Exception as ex:
+                    UREF["err"][e] = first_line(str(ex)) or type(ex).__name__
+                    print(f"[лимиты] {NAME[e]}: {UREF['err'][e]}", flush=True)
         finally:
             UREF.update(on=False, t=time.time())
 
@@ -830,7 +846,7 @@ def run_claude(prompt, ws=WSR, sid=None, save=True, tag=""):
                 STATE["cc_session"] = ev["session_id"]
             if t == "system" and ev.get("model"):
                 init_model = STATE["cc_model"] = ev["model"]
-            jsave(STATEF, STATE)
+            save_state()
         if t == "rate_limit_event":
             cc_rate(ev.get("rate_limit_info"), res)
         elif t == "assistant":
@@ -944,7 +960,7 @@ def run_codex(prompt, ws=WSR, sid=None, save=True, tag=""):
             res["session"] = ev["thread_id"]
             if save:
                 STATE["cx_session"] = ev["thread_id"]
-                jsave(STATEF, STATE)
+                save_state()
         elif t == "item.started":
             BUSY["doing"] = cx_doing(it) or BUSY["doing"]
         elif t == "item.completed":
@@ -973,7 +989,7 @@ def run_codex(prompt, ws=WSR, sid=None, save=True, tag=""):
     info = codex_rollout(res["session"])
     if info.get("model"):
         res["model"] = STATE["cx_model"] = info["model"]
-        jsave(STATEF, STATE)
+        save_state()
     if isinstance(info.get("rl"), dict):
         wins = cx_usage(info["rl"])
         set_usage("codex", wins)
@@ -1057,7 +1073,7 @@ def finish(e, r, review=""):
             meta["review"] = review
         log("bot", r["text"], meta=meta)
         STATE.setdefault("synced", {})[e] = SEQ         # этот ИИ знает разговор до этого места
-        jsave(STATEF, STATE)
+        save_state()
     elif r["stopped"]:
         log("sys", "⏹ Остановлено")
     else:
@@ -1416,7 +1432,7 @@ class H(BaseHTTPRequestHandler):
                 LOG.clear()
             log("sys", "Новый разговор")
             STATE["synced"] = {e: SEQ for e in SUBS}
-            jsave(STATEF, STATE)
+            save_state()
             return send(self, 200, {"ok": True})
         if self.path == "/api/backup":
             try:

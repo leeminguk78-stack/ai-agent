@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ИИ-агент-разработчик для Termux — v0.5
+ИИ-агент-разработчик для Termux — v0.6
 Движки: Claude Code (подписка, через proot Ubuntu) и API-модели (Gemini/OpenRouter/Ollama).
 Только стандартная библиотека Python.
   Пульт (PWA): http://127.0.0.1:8765
@@ -12,7 +12,7 @@ import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.5"
+VERSION = "0.6"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"
@@ -103,7 +103,7 @@ SEQ = LOG[-1]["seq"] if LOG else 0
 STATE = jload(STATEF, {})
 STATE = STATE if isinstance(STATE, dict) else {}
 LOCK, JOB_LOCK = threading.Lock(), threading.Lock()
-BUSY = {"on": False, "stop": False, "proc": None}
+BUSY = {"on": False, "stop": False, "proc": None, "started": 0}
 
 
 def log(kind, text="", **kw):
@@ -299,7 +299,8 @@ def run_api(msg):
             if not calls:
                 text = m.get("content") or "(пустой ответ)"
                 HISTORY.append({"role": "assistant", "content": text})
-                log("bot", text)
+                log("bot", text, meta={"engine": f"API · {cfg['provider']}",
+                                       "model": cfg["providers"].get(cfg["provider"], {}).get("model", "")})
                 return
             HISTORY.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
             for c in calls:
@@ -396,6 +397,8 @@ def run_claude(msg):
             t = ev.get("type")
             if t in ("system", "result") and ev.get("session_id"):
                 STATE["cc_session"] = ev["session_id"]
+                if t == "system" and ev.get("model"):
+                    STATE["cc_model"] = ev["model"]
                 jsave(STATEF, STATE)
             if t == "assistant":
                 main = ev.get("parent_tool_use_id") is None
@@ -423,8 +426,10 @@ def run_claude(msg):
                 if ev.get("is_error"):
                     log("err", ev.get("result") or f"Claude Code: {ev.get('subtype', 'ошибка')}")
                 else:
+                    used = list((ev.get("modelUsage") or {}).keys())
                     log("bot", ev.get("result") or note or "(пустой ответ)",
-                        meta={"sec": round((ev.get("duration_ms") or 0) / 1000), "turns": ev.get("num_turns")})
+                        meta={"sec": round((ev.get("duration_ms") or 0) / 1000), "turns": ev.get("num_turns"),
+                              "engine": "Claude Code", "model": used[0] if used else STATE.get("cc_model", "")})
                 note = ""
         p.wait()
     finally:
@@ -442,9 +447,22 @@ def run_claude(msg):
                 "\nЕсли ошибка повторяется — нажми 🗑 (новый разговор).")
 
 
+def engine_info():
+    """Кто сейчас выполняет задачи: движок, модель, способ оплаты."""
+    if cfg["engine"] == "claude":
+        seen, chosen = STATE.get("cc_model", ""), cfg["claude"].get("model", "")
+        return {"engine": "claude", "label": "Claude Code", "via": "подписка Claude",
+                "model": seen if (not chosen or chosen in seen) else chosen, "model_set": chosen}
+    name = cfg["provider"]
+    p = cfg["providers"].get(name, {})
+    return {"engine": "api", "label": f"API · {name}", "via": "локально" if name == "ollama" else "API-ключ",
+            "model": p.get("model", ""), "model_set": p.get("model", ""),
+            "ready": bool(p.get("model")) and (bool(p.get("api_key")) or name == "ollama")}
+
+
 # ---------- задачи ----------
 def start_job(msg):
-    BUSY.update(on=True, stop=False, proc=None)
+    BUSY.update(on=True, stop=False, proc=None, started=time.time())
     log("user", msg)
     engine = cfg["engine"]
 
@@ -531,7 +549,8 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 entries = [e for e in LOG if e["seq"] > after]
             return send(self, 200, {"entries": entries, "busy": BUSY["on"], "engine": cfg["engine"],
-                                   "version": VERSION})
+                                   "version": VERSION, "info": engine_info(),
+                                   "elapsed": round(time.time() - BUSY["started"]) if BUSY["on"] else 0})
         if path == "/api/files":
             return send(self, 200, {"files": files_list()})
         if path.startswith("/preview/"):

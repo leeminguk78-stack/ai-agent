@@ -38,16 +38,26 @@ textarea{flex:1;resize:none;background:var(--bg);color:var(--fg);border:1px soli
 #set label{display:block;font-size:13px;color:var(--mut);margin-top:8px}
 #set input,#set select{width:100%;padding:8px;background:var(--bg);color:var(--fg);border:1px solid #2a2f3a;border-radius:8px}
 #ver{color:var(--mut);font-size:12px}
+#info{display:flex;flex-wrap:wrap;gap:5px 8px;align-items:center;padding:6px 12px;background:#14171d;border-bottom:1px solid var(--line);font-size:13px;color:var(--mut)}
+#info b{color:var(--fg);font-weight:600}
+#info .chip{background:#262b36;border-radius:999px;padding:1px 9px;color:#c9cede}
+#info .chip:empty{display:none}
+#iDot{width:9px;height:9px;border-radius:50%;background:#8a90a0;flex:none}
+#iState{margin-left:auto;white-space:nowrap}
+.hint{font-size:12px;color:var(--mut);margin:4px 0 0}
 a{color:var(--acc)}
 </style></head><body>
 <header><b>🤖 Агент</b>
 <select id="eng" onchange="setEng()"><option value="claude">Claude Code</option><option value="api">API-модель</option></select>
 <button onclick="files()">📁</button><button onclick="backup()">💾</button><button id="rst" onclick="reset()">🗑</button><button onclick="toggleSet()">⚙</button></header>
+<div id="info" onclick="toggleSet()"><span id="iDot"></span><b id="iEng">…</b><span id="iModel" class="chip"></span><span id="iVia" class="chip"></span><span id="iState"></span></div>
 <div id="off">⚠️ Нет связи с агентом. <span id="offcmd">Запусти в Termux: <code>bash ~/agent-app/start.sh</code></span><button id="offbtn" onclick="AgentApp.startAgent()">▶ Запустить</button> <span id="st"></span></div>
 <div id="set">
 <h4>Claude Code</h4>
+<p class="hint">Основной движок: работает по подписке Claude в Ubuntu, пишет и проверяет код, собирает APK, помнит разговор до 🗑.</p>
 <label>Модель (пусто — по умолчанию; sonnet или haiku тратят меньше лимитов)</label><input id="ccm" placeholder="по умолчанию">
 <h4>API-модель</h4>
+<p class="hint">Запасной движок: Gemini или OpenRouter по API-ключу, либо локальная модель Ollama. Работает с файлами в Termux, но не собирает APK.</p>
 <label>Провайдер</label><select id="prov" onchange="fill()"></select>
 <label>Модель</label><input id="model" placeholder="имя модели">
 <label>Base URL</label><input id="url">
@@ -85,18 +95,27 @@ p.append(d)})})}
 function render(e){let d;
 if(e.t=='step'){d=el('details','step');d.append(el('summary',null,(e.err?'⚠️ ':'🔧 ')+e.tool+' '+(e.brief||'')),el('pre',null,(e.args||'')+'\n\n→ '+(e.result||'')))}
 else{d=el('div','msg '+e.t);if(e.t=='bot'||e.t=='note')md(d,e.text||'');else linkify(d,e.text||'');
-if(e.meta)d.append(el('div','meta','⏱ '+e.meta.sec+' с · ходов: '+e.meta.turns))}
+if(e.meta){const m=e.meta,p=[];if(m.sec!=null)p.push('⏱ '+m.sec+' с');if(m.turns!=null)p.push('ходов: '+m.turns);
+if(m.engine)p.push(m.engine+(m.model?' · '+prettyModel(m.model):''));if(p.length)d.append(el('div','meta',p.join(' · ')))}}
 log.appendChild(d)}
 async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}
+function prettyModel(m){if(!m)return'';const x=m.match(/^claude-([a-z]+)-([0-9-]+?)(?:-\d{8})?$/);
+return x?x[1][0].toUpperCase()+x[1].slice(1)+' '+x[2].replace(/-/g,'.'):m}
+function fmt(t){return Math.floor(t/60)+':'+String(t%60).padStart(2,'0')}
+function renderInfo(j){const i=j.info||{};$('#iEng').textContent=i.label||'';
+$('#iModel').textContent=i.model?prettyModel(i.model):(i.engine=='claude'?'модель по умолчанию':'модель не выбрана');
+$('#iVia').textContent=i.via||'';let st='готов',col='#3ecf8e';
+if(j.busy){st='⏳ работает '+fmt(j.elapsed||0);col='#f5b84a'}else if(i.engine=='api'&&!i.ready){st='⚠ настрой в ⚙';col='#e5534b'}
+$('#iState').textContent=st;$('#iDot').style.background=col}
 function setBusy(b){busy=b;$('#send').textContent=b?'⏹':'➤';$('#wait').style.display=b?'block':'none'}
 async function poll(){clearTimeout(timer);
 try{const j=await api('/api/log?after='+last);$('#off').style.display='none';
 const down=log.scrollHeight-log.scrollTop-log.clientHeight<150;
 if(first&&!j.entries.length)render({t:'sys',text:'Опиши задачу, например: «Создай сайт-визитку кофейни в sites/coffee»'});first=false;
 j.entries.forEach(e=>{render(e);last=e.seq});if(j.entries.length&&down)log.scrollTop=log.scrollHeight;
-setBusy(j.busy);if(j.engine&&$('#eng').value!=j.engine)$('#eng').value=j.engine;
+setBusy(j.busy);renderInfo(j);if(j.engine&&$('#eng').value!=j.engine)$('#eng').value=j.engine;
 if(j.version&&C.version&&j.version!==C.version){location.reload();return}}
-catch(e){$('#off').style.display='block'}
+catch(e){$('#off').style.display='block';$('#iState').textContent='нет связи';$('#iDot').style.background='#e5534b'}
 timer=setTimeout(poll,busy?1500:6000)}
 async function send(){if(busy){await api('/api/stop',{});poll();return}
 const t=$('#inp').value.trim();if(!t)return;$('#inp').value='';
@@ -120,8 +139,8 @@ async function load(){try{C=await api('/api/config')}catch(e){return}$('#prov').
 Object.keys(C.providers).forEach(n=>{const o=el('option',null,n);o.value=n;$('#prov').append(o)});
 $('#prov').value=C.provider;$('#eng').value=C.engine;$('#ccm').value=C.cc_model||'';$('#ver').textContent='Агент v'+C.version;fill()}
 async function saveSet(){C=await api('/api/config',{provider:$('#prov').value,model:$('#model').value,base_url:$('#url').value,api_key:$('#key').value,cc_model:$('#ccm').value});
-fill();render({t:'sys',text:'⚙ Настройки сохранены'})}
-async function setEng(){C=await api('/api/config',{engine:$('#eng').value});render({t:'sys',text:'Движок: '+$('#eng').selectedOptions[0].textContent})}
+fill();render({t:'sys',text:'⚙ Настройки сохранены'});poll()}
+async function setEng(){C=await api('/api/config',{engine:$('#eng').value});render({t:'sys',text:'Движок: '+$('#eng').selectedOptions[0].textContent});poll()}
 $('#inp').addEventListener('keydown',e=>{if(e.key=='Enter'&&(e.ctrlKey||e.metaKey))send()});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll()});
 function setStatus(t){$('#st').textContent=t}

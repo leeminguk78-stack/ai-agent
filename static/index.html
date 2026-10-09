@@ -74,12 +74,14 @@ a{color:var(--acc)}
 <label>Модель (пусто — по умолчанию)</label><input id="cxm" placeholder="по умолчанию">
 <label>Глубина рассуждений</label><select id="cxe"><option value="">по умолчанию</option><option value="low">low — быстрее, экономит лимит</option><option value="medium">medium</option><option value="high">high — тщательнее</option><option value="xhigh">xhigh — максимум</option></select>
 <details class="how"><summary>Как подключить Codex (один раз)</summary>
-<p>В Termux, по одной команде:</p>
+<p>1. На chatgpt.com: аватар → Settings → Security → включи «Device code authorization for Codex».</p>
+<p>2. В Termux, по одной команде:</p>
 <pre>proot-distro login ubuntu</pre>
 <pre>curl -fsSL https://chatgpt.com/codex/install.sh | sh</pre>
-<pre>/root/.local/bin/codex login</pre>
+<pre>/root/.local/bin/codex login --device-auth</pre>
+<p>3. Открой в Chrome ссылку <code>https://auth.openai.com/codex/device</code>, войди в ChatGPT и введи код из Termux (действует 15 минут). Когда Termux сообщит об успешном входе:</p>
 <pre>exit</pre>
-<p>После <code>codex login</code> открой показанную ссылку в Chrome (в Termux: долгое нажатие → «Ещё» → «Select URL») и войди в ChatGPT. Если вход не завершается — вместо неё <code>/root/.local/bin/codex login --device-auth</code>: открыть короткую ссылку и ввести код.</p></details>
+<p>Обычный <code>codex login</code> (через localhost) на Android часто падает с ошибкой «Token exchange failed» — поэтому вход по коду.</p></details>
 <h4>Тандем</h4>
 <p class="hint">Один ИИ пишет, второй проверяет копию файлов и присылает замечания, автор исправляет. Ревьюер ничего не меняет в проектах. Тратит лимиты обеих подписок.</p>
 <label>Роли</label><select id="duoA"><option value="claude">Claude пишет — Codex проверяет</option><option value="codex">Codex пишет — Claude проверяет</option></select>

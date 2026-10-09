@@ -53,7 +53,7 @@ else
   if proot-distro login ubuntu -- bash -c "$CX login status" >/dev/null 2>&1; then
     ok "Вход в ChatGPT выполнен"
   else
-    no "Нет входа: proot-distro login ubuntu, затем /root/.local/bin/codex login"
+    no "Нет входа: proot-distro login ubuntu, затем /root/.local/bin/codex login --device-auth"
   fi
 fi
 

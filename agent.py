@@ -16,7 +16,7 @@ import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.7"
+VERSION = "0.7.1"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"
@@ -373,10 +373,10 @@ SETUP = {
     "claude": ("\nУстановка (в Termux): proot-distro login ubuntu → curl -fsSL https://claude.ai/install.sh | bash → "
                "/root/.local/bin/claude auth login → exit"),
     "codex": ("\nУстановка (в Termux): proot-distro login ubuntu → curl -fsSL https://chatgpt.com/codex/install.sh | sh → "
-              "/root/.local/bin/codex login → exit"),
+              "/root/.local/bin/codex login --device-auth → exit"),
 }
 LOGIN = {"claude": "\nВойди заново (в Termux): proot-distro login ubuntu → /root/.local/bin/claude auth login → exit",
-         "codex": "\nВойди заново (в Termux): proot-distro login ubuntu → /root/.local/bin/codex login → exit"}
+         "codex": "\nВойди заново (в Termux): proot-distro login ubuntu → /root/.local/bin/codex login --device-auth → exit"}
 LIMIT_RE = re.compile(r"hit your [^.\n]{0,40}limit|usage limit|rate.?limit|limit (reached|exceeded)|quota exceeded|"
                       r"out of credits|spend (cap|limit)|shared budget|too many requests|\b429\b", re.I)
 AUTH_RE = re.compile(r"\b401\b|unauthori[sz]ed|not logged in|log ?in again|/login|authenticat|token (has )?expired|"

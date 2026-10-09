@@ -43,15 +43,18 @@ exit
 
 Второй ИИ — **Codex** (нужна подписка ChatGPT Plus/Pro), необязательно:
 
+1. На chatgpt.com: аватар → **Settings → Security** → включи **«Device code authorization for Codex»**.
+2. В Termux:
+
 ```bash
 proot-distro login ubuntu
 # дальше — внутри Ubuntu:
 curl -fsSL https://chatgpt.com/codex/install.sh | sh
-/root/.local/bin/codex login
+/root/.local/bin/codex login --device-auth
 exit
 ```
 
-`codex login` покажет ссылку — открой её в Chrome на телефоне и войди в ChatGPT; после входа браузер вернётся на `localhost:1455`, и Codex сохранит вход. Если вход не завершается — `/root/.local/bin/codex login --device-auth` (код вводится на сайте).
+`--device-auth` покажет одноразовый код: открой в Chrome `https://auth.openai.com/codex/device`, войди в ChatGPT и введи код (действует 15 минут). Обычный `codex login` с возвратом на `127.0.0.1:1455` на Android часто заканчивается ошибкой «Token exchange failed: … 400 Bad Request» — поэтому вход по коду.
 
 Проверить всё сразу: `bash ~/agent-app/check.sh`
 

@@ -26,7 +26,6 @@ check_tool python python --version
 check_tool git git --version
 check_tool node node --version
 check_tool proot-distro printf 'установлен'      # у proot-distro 5+ нет ключа --version
-check_tool ollama ollama --version
 
 echo "== Claude Code (в Ubuntu) =="
 if ! command -v proot-distro >/dev/null; then
@@ -56,6 +55,32 @@ else
     ok "Вход в ChatGPT выполнен"
   else
     no "Нет входа: proot-distro login ubuntu, затем /root/.local/bin/codex login --device-auth"
+  fi
+fi
+
+echo "== Бесплатный ИИ (необязательно) =="
+python - <<'PY' 2>/dev/null || info "Настроек ещё нет — агент создаст их при первом запуске"
+import json, os
+c = json.load(open(os.path.expanduser("~/agent/config.json")))
+n = (c.get("free") or {}).get("provider") or "gemini"
+p = (c.get("providers") or {}).get(n) or {}
+title = {"gemini": "Gemini", "openrouter": "OpenRouter"}.get(n, n)
+if p.get("api_key"):
+    print(f"  \033[32m✓\033[0m Ключ {title} сохранён, модель: {p.get('model') or 'по умолчанию'}")
+else:
+    print(f"  • Ключ {title} не задан: пульт → ⚙ → «Бесплатный ИИ» (ключ — на aistudio.google.com/apikey)")
+PY
+
+echo "== Локальный ИИ (Ollama, необязательно) =="
+if ! command -v ollama >/dev/null; then
+  info "Ollama не установлен (локальный ИИ без интернета): pkg install ollama"
+else
+  ok "$(ollama --version 2>&1 | first)"
+  if curl -s -m 2 -o /dev/null http://127.0.0.1:11434/api/version; then
+    M=$(curl -s -m 3 http://127.0.0.1:11434/api/tags | python -c 'import json,sys; print(", ".join(m["name"] for m in json.load(sys.stdin).get("models") or []))' 2>/dev/null)
+    ok "Ollama запущен, скачанные модели: ${M:-нет}"
+  else
+    info "Ollama не запущен — агент запустит его сам при первой задаче"
   fi
 fi
 

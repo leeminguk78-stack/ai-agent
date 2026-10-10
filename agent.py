@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-ИИ-агент-разработчик для Termux — v0.7
+ИИ-агент-разработчик для Termux — v0.9
 Движки:
   • Claude Code (подписка Claude) и Codex (подписка ChatGPT) — оба в Ubuntu через proot;
   • «Тандем»: один ИИ пишет, второй проверяет копию файлов, автор исправляет замечания;
-  • резерв: кончился лимит у одного ИИ — задачу продолжает другой;
-  • API-модели (Gemini / OpenRouter / Ollama).
+  • «Бесплатный ИИ»: облачная модель по бесплатному ключу (Gemini, OpenRouter);
+  • «Локальный ИИ»: модель прямо на телефоне (Ollama) — без интернета и лимитов;
+  • резерв: кончился лимит или пропала сеть — задачу продолжает следующий ИИ
+    (Claude ⇄ Codex → бесплатный → локальный).
 Только стандартная библиотека Python.
   Пульт (PWA): http://127.0.0.1:8765
   Превью:      http://127.0.0.1:8766/<путь внутри workspace>/
@@ -16,7 +18,7 @@ import urllib.request, urllib.error, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-VERSION = "0.8.1"
+VERSION = "0.9"
 PORT = int(os.environ.get("AGENT_PORT", 8765))
 PPORT = PORT + 1                      # превью сайтов — отдельный адрес без доступа к пульту
 BASE = Path.home() / "agent"
@@ -35,27 +37,50 @@ SKIP = {"node_modules", ".git", "build", ".gradle", "__pycache__", ".agent", ".a
 MAX_READ, MAX_OUT = 20000, 6000
 
 DEFAULT_CFG = {
-    "engine": "claude",                 # claude | codex | duo («Тандем») | api
+    "engine": "claude",                 # claude | codex | duo («Тандем») | free («Бесплатный ИИ») | local («Локальный ИИ»)
     "claude": {"distro": "ubuntu", "bin": "/root/.local/bin/claude", "model": "", "isolated": True,
                "timeout": 1800, "tools": "Bash,Read,Edit,Write,WebFetch,WebSearch"},
     "codex": {"bin": "codex", "model": "", "effort": "", "timeout": 1800},
     "duo": {"author": "claude", "rounds": 1},
-    "fallback": True,                   # у одного ИИ кончился лимит — задачу продолжает другой
-    "provider": "gemini",
+    "fallback": True,                   # кончился лимит или нет сети — задачу продолжает следующий ИИ
+    "free": {"provider": "gemini"},     # «Бесплатный ИИ»: облачный сервис по API-ключу
+    "local": {"ctx": 8192},             # «Локальный ИИ» (Ollama): размер контекста модели
+    "provider": "gemini",               # (до v0.9) выбранный API-сервис
     "providers": {
         "gemini": {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "", "model": ""},
         "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key": "", "model": ""},
-        "ollama": {"base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama", "model": "qwen2.5:3b"},
+        "ollama": {"base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama", "model": ""},
     },
-    "max_steps": 15, "cmd_timeout": 90, "auto_backups": 15,
+    "max_steps": 15, "cmd_timeout": 180, "auto_backups": 15,
 }
 
-# движки по подписке
+# движки по подписке и на API
 SUBS = ("claude", "codex")
+APIS = ("free", "local")
+ENGINES = SUBS + ("duo",) + APIS
 NAME = {"claude": "Claude", "codex": "Codex"}
 LABEL = {"claude": "Claude Code", "codex": "Codex"}
-VIA = {"claude": "подписка Claude", "codex": "подписка ChatGPT"}
+VIA = {"claude": "подписка Claude", "codex": "подписка ChatGPT", "free": "бесплатный ключ", "local": "на телефоне"}
+PTITLE = {"gemini": "Gemini", "openrouter": "OpenRouter", "ollama": "Ollama"}
+DEFAULT_MODEL = {"gemini": "gemini-3.8-flash", "openrouter": "", "ollama": "qwen3:4b"}
+OLD_MODELS = {"gemini": ("gemini-2.5-flash", "gemini-2.0-flash"), "ollama": ("qwen2.5:3b",)}   # прежние подсказки
 EFFORTS = ("", "low", "medium", "high", "xhigh")
+LOCAL_CTX = (4096, 8192, 16384)
+LOCAL_MODELS = [("qwen3:4b", "2.5 ГБ — по умолчанию"), ("qwen3:1.7b", "1.4 ГБ — быстрее, проще"),
+                ("qwen3.5:4b", "3.4 ГБ — новее и умнее, медленнее"), ("granite4.1:3b", "2.1 ГБ — IBM, код и инструменты"),
+                ("llama3.2:3b", "2.0 ГБ")]
+
+
+def nm(e):
+    """Короткое имя движка для сообщений: Claude, Codex, Gemini, «локальный ИИ»."""
+    if e in NAME:
+        return NAME[e]
+    return "локальный ИИ" if e == "local" else PTITLE.get(prov(e), prov(e))
+
+
+def lb(e):
+    """Подпись движка под ответом: «Claude Code», «Бесплатный ИИ», «Локальный ИИ» (модель пишется рядом)."""
+    return LABEL.get(e) or ("Локальный ИИ" if e == "local" else "Бесплатный ИИ")
 
 
 def other(e):
@@ -94,6 +119,15 @@ def merge(dst, src):
 
 
 cfg = merge(json.loads(json.dumps(DEFAULT_CFG)), jload(CFG, {}))
+if cfg["engine"] == "api":                    # до v0.9 был один движок «API-модель»
+    cfg["engine"] = "local" if cfg.get("provider") == "ollama" else "free"
+if "free" not in jload(CFG, {}) and cfg.get("provider") in ("gemini", "openrouter"):
+    cfg["free"]["provider"] = cfg["provider"]
+for _n, _old in OLD_MODELS.items():           # прежние модели по умолчанию → нынешние
+    if cfg["providers"].get(_n, {}).get("model") in _old:
+        cfg["providers"][_n]["model"] = ""
+if cfg.get("cmd_timeout") == 90:              # до v0.9: команды теперь идут через Ubuntu (proot) — даём больше времени
+    cfg["cmd_timeout"] = 180
 
 
 def save_cfg():
@@ -101,25 +135,34 @@ def save_cfg():
 
 
 def public_cfg():
-    return {"version": VERSION, "engine": cfg["engine"], "provider": cfg["provider"],
+    return {"version": VERSION, "engine": cfg["engine"],
             "cc_model": cfg["claude"].get("model", ""),
             "cx_model": cfg["codex"].get("model", ""), "cx_effort": cfg["codex"].get("effort", ""),
             "duo_author": cfg["duo"].get("author", "claude"), "duo_rounds": cfg["duo"].get("rounds", 1),
             "fallback": bool(cfg.get("fallback", True)),
-            "providers": {n: {"base_url": p.get("base_url", ""), "model": p.get("model", ""),
-                              "has_key": bool(p.get("api_key"))} for n, p in cfg["providers"].items()}}
+            "free_provider": cfg["free"].get("provider") or "gemini", "local_ctx": int(cfg["local"].get("ctx") or 8192),
+            "default_models": DEFAULT_MODEL, "local_models": LOCAL_MODELS,
+            "providers": {n: {"model": p.get("model", ""), "has_key": bool(p.get("api_key"))}
+                          for n, p in cfg["providers"].items()}}
 
 
 def update_cfg(d):
-    if d.get("engine") in ("claude", "codex", "duo", "api"):
+    if d.get("engine") in ENGINES:
         cfg["engine"] = d["engine"]
-    if d.get("provider"):
-        name = str(d["provider"]).strip()
-        cfg["provider"] = name
-        p = cfg["providers"].setdefault(name, {"base_url": "", "api_key": "", "model": ""})
-        for k in ("base_url", "model", "api_key"):
-            if d.get(k):
-                p[k] = str(d[k]).strip()
+    was = (cfg["free"].get("provider"), model_of("free"), pconf(prov("free")).get("api_key"))
+    if d.get("free_provider") in ("gemini", "openrouter"):
+        cfg["free"]["provider"] = d["free_provider"]
+    fp = pconf(cfg["free"].get("provider") or "gemini")
+    if "free_model" in d:
+        fp["model"] = str(d["free_model"] or "").strip()
+    if d.get("free_key"):                      # пустое поле — ключ не меняем
+        fp["api_key"] = str(d["free_key"]).strip()
+    if was != (cfg["free"].get("provider"), model_of("free"), fp.get("api_key")):
+        clear_limit("free")                     # у другой модели или ключа — свой лимит
+    if "local_model" in d:
+        pconf("ollama")["model"] = str(d["local_model"] or "").strip()
+    if str(d.get("local_ctx")) in {str(c) for c in LOCAL_CTX}:
+        cfg["local"]["ctx"] = int(d["local_ctx"])
     if "cc_model" in d:
         cfg["claude"]["model"] = str(d["cc_model"] or "").strip()
     if "cx_model" in d:
@@ -177,8 +220,9 @@ def sync_kit():
 
 # ---------- инструменты (для API-моделей) ----------
 def safe(rel):
-    """Не даём выйти за пределы workspace."""
-    p = (WSR / (rel or ".")).resolve()
+    """Не даём выйти за пределы workspace. Путь «/workspace/…» (как в Ubuntu) тоже понимаем."""
+    rel = re.sub(r"^/?workspace(/|$)", "", str(rel or "").strip()) or "."
+    p = (WSR / rel).resolve()
     if p != WSR and WSR not in p.parents:
         raise ValueError(f"путь вне workspace: {rel}")
     return p
@@ -223,15 +267,31 @@ DENY = ["rm -rf /", "rm -rf ~", "rm -rf $HOME", "mkfs", ":(){", "> /dev/block"]
 
 
 def t_run_command(command):
+    """Команда модели — в той же Ubuntu, что у Claude и Codex, изолированно: видна только папка /workspace."""
     if any(d in command for d in DENY):
         return "ОТКЛОНЕНО: команда выглядит опасной"
+    limit = 900 if "apk.sh" in command else int(cfg.get("cmd_timeout") or 180)
+    if shutil.which("proot-distro") and rootfs() is not None:
+        cmd = proot_cmd("sh", 'export PATH="/root/.local/bin:$PATH"; cd /workspace && eval "$1"', [command])
+    else:                                       # Ubuntu нет — прямо в Termux, /workspace = папка проектов
+        cmd = ["bash", "-c", re.sub(r"(?<![\w.-])/workspace(?![\w-])", str(WSR), command)]
     try:
-        r = subprocess.run(command, shell=True, cwd=WSR, capture_output=True, text=True,
-                           timeout=cfg["cmd_timeout"], stdin=subprocess.DEVNULL)
+        p = subprocess.Popen(cmd, cwd=WSR, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, errors="replace", start_new_session=True)
+    except OSError as e:
+        return f"ОШИБКА: не удалось запустить команду: {e}"
+    BUSY["proc"] = p                            # ⏹ останавливает и команду
+    try:
+        out, _ = p.communicate(timeout=limit)
     except subprocess.TimeoutExpired:
-        return f"ТАЙМАУТ {cfg['cmd_timeout']} с. Серверы не запускай — превью уже работает."
-    out = (r.stdout + (f"\n[stderr]\n{r.stderr}" if r.stderr else "")).strip()
-    return f"exit={r.returncode}\n" + (out if len(out) <= MAX_OUT else "…" + out[-MAX_OUT:])
+        kill_proc(p)
+        out, _ = p.communicate()
+        return (f"ТАЙМАУТ {limit} с — команда остановлена. Серверы и фоновые процессы не запускай: превью уже работает.\n"
+                + (out or "")[-MAX_OUT:])
+    finally:
+        BUSY["proc"] = None
+    out = (out or "").strip()
+    return f"exit={p.returncode}\n" + (out if len(out) <= MAX_OUT else "…" + out[-MAX_OUT:])
 
 
 def t_make_backup(note=""):
@@ -267,7 +327,8 @@ TOOLS = [
     tool("list_files", "Список файлов в папке workspace (рекурсивно)", {"path": S}, []),
     tool("read_file", "Прочитать текстовый файл", {"path": S}, ["path"]),
     tool("write_file", "Создать или полностью перезаписать файл", {"path": S, "content": S}, ["path", "content"]),
-    tool("run_command", "Выполнить bash-команду в workspace (тесты, проверка)", {"command": S}, ["command"]),
+    tool("run_command", "Выполнить bash-команду в Ubuntu в папке /workspace (проверки, тесты; сборка APK — "
+         "bash /workspace/.agent/apk.sh <id>)", {"command": S}, ["command"]),
     tool("make_backup", "Сохранить архив всего workspace", {"note": S}, []),
 ]
 
@@ -288,17 +349,28 @@ def files_list():
     return out
 
 
-# ---------- движок: API-модель ----------
-SYSTEM = f"""Ты — ИИ-агент-разработчик в Termux на Android (aarch64, без root).
-Рабочая папка (workspace) — корень для всех путей. Сайты — в sites/<имя>/, Android-проекты — в android/<имя>/.
+# ---------- движки на API: «Бесплатный ИИ» (Gemini и др.) и «Локальный ИИ» (Ollama на телефоне) ----------
+SYSTEM = f"""Ты — ИИ-агент-разработчик на Android-телефоне. Проекты пользователя — в папке /workspace.
+Инструменты:
+- list_files, read_file, write_file — пути внутри /workspace, например sites/coffee/index.html;
+- run_command — bash-команда в Ubuntu в папке /workspace (есть python3, node, git, gh).
 Правила:
-- Сначала посмотри файлы (list_files/read_file), потом меняй.
-- Пиши файлы целиком через write_file (старая версия сохраняется в бэкап).
-- После изменений проверяй результат через run_command: python -m py_compile, node --check, тесты.
-  Если ошибка — исправь и проверь снова.
-- Не запускай серверы: превью сайтов уже работает по адресу http://127.0.0.1:{PPORT}/<путь>/
+- Сначала посмотри файлы, потом меняй. Файлы пиши целиком через write_file (старая версия сохраняется в бэкап).
+- После изменений проверь: node --check для JS, python3 -m py_compile, тесты. Ошибка — исправь и проверь снова.
+- Сайты — в sites/<имя>/. Превью уже работает: http://127.0.0.1:{PPORT}/sites/<имя>/ — дай эту ссылку. Серверы не запускай.
 - Не устанавливай пакеты без просьбы пользователя.
-- Отвечай по-русски, кратко: что сделано, где файлы, ссылка на превью."""
+- Отвечай по-русски, кратко: что сделано, где файлы, как проверить."""
+
+
+def system_for(local):
+    """Маленькой локальной модели — короткие правила; облачной — ещё и подробные правила папки (AGENTS.md)."""
+    if local:
+        return SYSTEM
+    try:
+        rules = (WS / "AGENTS.md").read_text(errors="replace")
+    except OSError:
+        rules = ""
+    return SYSTEM + ("\n\nПодробные правила рабочей папки (AGENTS.md):\n" + rules if rules else "")
 
 
 def load_history():
@@ -309,66 +381,433 @@ def load_history():
     return [{"role": "system", "content": SYSTEM}]
 
 
-HISTORY = load_history()
+HISTORY = load_history()                      # общий разговор бесплатного и локального ИИ
 
 
-def call_llm(messages):
-    name = cfg["provider"]
-    p = cfg["providers"].get(name, {})
-    if not p.get("model"):
-        raise RuntimeError(f"Не указана модель для «{name}». Открой ⚙ Настройки.")
-    if not p.get("api_key") and name != "ollama":
-        raise RuntimeError(f"Не указан API-ключ для «{name}». Открой ⚙ Настройки.")
-    body = {"model": p["model"], "messages": messages, "tools": TOOLS, "tool_choice": "auto"}
-    req = urllib.request.Request(p["base_url"].rstrip("/") + "/chat/completions", data=json.dumps(body).encode(),
+class LLMError(Exception):
+    """Ошибка API-модели: limit — кончился лимит, offline — нет связи (тогда поможет локальная модель)."""
+    def __init__(self, msg, limit=False, offline=False, until=0):
+        super().__init__(msg)
+        self.limit, self.offline, self.until = limit, offline, until
+
+
+class Stopped(Exception):
+    pass
+
+
+def prov(e):
+    """Сервис API-движка: локальный ИИ — всегда Ollama, бесплатный — выбранный в ⚙ (Gemini по умолчанию)."""
+    return "ollama" if e == "local" else cfg["free"].get("provider") or "gemini"
+
+
+def pconf(name):
+    return cfg["providers"].setdefault(name, {"base_url": "", "api_key": "", "model": ""})
+
+
+def model_of(e):
+    return pconf(prov(e)).get("model") or DEFAULT_MODEL.get(prov(e), "")
+
+
+def interruptible(fn, *a):
+    """Долгий запрос к модели можно прервать кнопкой ⏹: ответ, пришедший позже, просто не используем."""
+    box = {}
+
+    def run():
+        try:
+            box["ok"] = fn(*a)
+        except BaseException as ex:            # noqa: B902 — переносим любую ошибку в основной поток
+            box["err"] = ex
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    while t.is_alive():
+        t.join(0.5)
+        if BUSY["stop"]:
+            raise Stopped()
+    if "err" in box:
+        raise box["err"]
+    return box.get("ok")
+
+
+def pt_midnight(now=None):
+    """Следующая полночь по тихоокеанскому времени — тогда Google обнуляет суточные бесплатные лимиты."""
+    now = time.time() if now is None else now
+    y = time.gmtime(now).tm_year
+
+    def sunday(month, n):                       # n-е воскресенье месяца, около 2:00 по времени США
+        wd = time.gmtime(calendar.timegm((y, month, 1, 0, 0, 0))).tm_wday
+        return calendar.timegm((y, month, 1 + (6 - wd) % 7 + 7 * (n - 1), 10, 0, 0))
+
+    off = 7 if sunday(3, 2) <= now < sunday(11, 1) else 8      # летом UTC−7, зимой UTC−8
+    t = int(now) // 86400 * 86400 + off * 3600
+    return t if t > now else t + 86400
+
+
+def limit_info(body):
+    """Ответ 429 → (когда снова можно, суточный ли это лимит).
+    Gemini пишет retryDelay и quotaId «…PerDay…», OpenRouter — X-RateLimit-Reset и «per-day»."""
+    body = body or ""
+    daily = re.search(r"PerDay|per.?day|daily", body, re.I) is not None
+    reset = re.search(r'X-RateLimit-Reset"?\s*:\s*"?(\d{10,13})', body)
+    delay = re.search(r'"retryDelay"\s*:\s*"(\d+)(?:\.\d+)?s"', body)
+    if reset:
+        t = int(reset.group(1))
+        return (t / 1000 if t > 10 ** 11 else t), daily
+    if daily:
+        return pt_midnight(), True
+    return time.time() + (int(delay.group(1)) if delay else 600), False
+
+
+BADKEY_RE = re.compile(r"API.?key.{0,20}(not valid|invalid|expired)|API_KEY_INVALID|No auth credentials|User not found",
+                       re.I)
+
+
+def api_err(text):
+    """Текст ошибки из ответа сервиса: {"error": {"message": …}} или (у Gemini) [{"error": …}]."""
+    try:
+        j = json.loads(text)
+    except ValueError:
+        return text
+    j = j[0] if isinstance(j, list) and j else j
+    err = j.get("error") if isinstance(j, dict) else None
+    if isinstance(err, dict):
+        return str(err.get("message") or text)
+    return str(err or text)
+
+
+def to_openai(messages):
+    """История → запрос OpenAI-формата. Вызовы инструментов уходят обратно как пришли: Gemini 3 требует вернуть
+    их подписи (extra_content.google.thought_signature), иначе ответит 400."""
+    out = []
+    for m in messages:
+        m = dict(m)
+        if m.get("role") == "tool":
+            m.pop("name", None)                 # имя инструмента нужно только Ollama
+        elif m.get("role") == "assistant" and m.get("tool_calls") and not m.get("content"):
+            m["content"] = None
+        out.append(m)
+    return out
+
+
+def call_openai(p, model, messages):
+    """OpenAI-совместимый API (Gemini, OpenRouter и др.)."""
+    body = {"model": model, "messages": to_openai(messages), "tools": TOOLS, "tool_choice": "auto"}
+    url = p["base_url"].rstrip("/") + "/chat/completions"
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json",
                                           "Authorization": "Bearer " + (p.get("api_key") or "none")})
     try:
         with urllib.request.urlopen(req, timeout=300) as r:
-            return json.load(r)
+            data = json.load(r)
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"API {e.code}: {e.read().decode(errors='replace')[:800]}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Нет связи с {p['base_url']}: {e.reason}")
+        text = e.read().decode(errors="replace")[:8000]
+        msg = api_err(text)
+        if e.code == 429:
+            until, daily = limit_info(text)
+            raise LLMError(f"{'Суточный лимит' if daily else 'Лимит запросов'} бесплатного тарифа исчерпан (429): "
+                           f"{first_line(msg)}", limit=True, until=until)
+        if e.code in (401, 403) or BADKEY_RE.search(text):
+            raise LLMError(f"Ключ не подошёл ({e.code}): {first_line(msg).rstrip('.')}. Проверь ключ в ⚙ («Бесплатный ИИ»).")
+        raise LLMError(f"API {e.code}: {clip(msg, 800)}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise LLMError(f"Нет связи с {url.split('/')[2]}: {getattr(e, 'reason', e)}", offline=True)
+    except ValueError:
+        raise LLMError(f"{url.split('/')[2]} прислал непонятный ответ (не JSON)")
+    if not isinstance(data, dict):
+        return {}
+    if data.get("error"):                       # OpenRouter иногда присылает ошибку с кодом 200
+        err = data["error"]
+        msg = str(err.get("message") if isinstance(err, dict) else err)
+        if isinstance(err, dict) and err.get("code") == 429:
+            until, daily = limit_info(json.dumps(err))
+            raise LLMError(f"{'Суточный лимит' if daily else 'Лимит запросов'} бесплатного тарифа исчерпан (429): "
+                           f"{first_line(msg)}", limit=True, until=until)
+        raise LLMError(f"API: {clip(msg, 800)}")
+    return (data.get("choices") or [{}])[0].get("message") or {}
 
 
-def run_api(msg):
-    start = len(HISTORY)
-    HISTORY.append({"role": "user", "content": msg})
+# ---------- Ollama: локальная модель прямо в Termux ----------
+OCAPS = {}                                    # что умеет модель: tools, thinking (из /api/show)
+
+
+def ollama_root():
+    return re.sub(r"/v1/?$", "", (pconf("ollama").get("base_url") or "http://127.0.0.1:11434").rstrip("/"))
+
+
+def ollama_api(path, body=None, timeout=10):
+    req = urllib.request.Request(ollama_root() + path, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def ollama_up():
     try:
+        ollama_api("/api/version", timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def ollama_local():
+    return re.match(r"https?://(127\.0\.0\.1|localhost)(:|/|$)", ollama_root()) is not None
+
+
+def log_tail(path, n=300):
+    """Последняя содержательная строка журнала программы (для сообщения об ошибке)."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 4000))
+            lines = [x.strip() for x in fh.read().decode("utf-8", "replace").splitlines() if x.strip()]
+    except OSError:
+        return "журнал не найден"
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", lines[-1])[:n] if lines else "журнал пуст"
+
+
+def ensure_ollama(model):
+    """Запустить Ollama (если не запущен) и скачать модель (если её ещё нет) — с прогрессом в пульте."""
+    if not ollama_up():
+        if not ollama_local():
+            raise LLMError(f"Ollama не отвечает по адресу {ollama_root()}", offline=True)
+        exe = shutil.which("ollama")
+        if not exe:
+            raise LLMError("Ollama не установлен. Установи один раз в Termux: pkg install ollama")
+        BUSY["doing"] = "запускаю Ollama…"
+        port = urllib.parse.urlparse(ollama_root()).port or 11434
+        env = dict(os.environ, OLLAMA_HOST=f"127.0.0.1:{port}", OLLAMA_KEEP_ALIVE="30m")
+        with open(BASE / "ollama.log", "ab") as lf:
+            sp = subprocess.Popen([exe, "serve"], stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT,
+                                  env=env, start_new_session=True)     # живёт и после остановки агента
+        for _ in range(120):
+            if BUSY["stop"]:
+                raise Stopped()
+            time.sleep(0.5)
+            if ollama_up():
+                break
+            if sp.poll() is not None and not ollama_up():
+                raise LLMError(f"Ollama не запустился (код {sp.returncode}): {log_tail(BASE / 'ollama.log')}")
+        else:
+            raise LLMError("Ollama не запустился за 60 с — подробности в ~/agent/ollama.log")
+    have = set()
+    for m in ollama_api("/api/tags").get("models") or []:
+        have |= {m.get("name"), m.get("model")}
+    if model in have or f"{model}:latest" in have:
+        return False
+    log("sys", f"📥 Скачиваю локальную модель {model} — один раз, это может занять несколько минут…")
+    req = urllib.request.Request(ollama_root() + "/api/pull", data=json.dumps({"model": model, "stream": True}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    parts = {}
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            for line in r:
+                if BUSY["stop"]:
+                    raise Stopped()
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("error"):
+                    raise LLMError(f"Не удалось скачать модель {model}: {ev['error']}")
+                if ev.get("digest") and ev.get("total"):
+                    parts[ev["digest"]] = (ev.get("completed") or 0, ev["total"])
+                    done, total = sum(c for c, _ in parts.values()), sum(t for _, t in parts.values())
+                    BUSY["doing"] = f"📥 {model}: {done * 100 // total}% из {total / 1e9:.1f} ГБ"
+                if ev.get("status") == "success":
+                    log("sys", f"✓ Модель {model} скачана")
+                    return True
+    except urllib.error.HTTPError as e:
+        raise LLMError(f"Не удалось скачать модель {model}: {e.read().decode(errors='replace')[:300]}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise LLMError(f"Не удалось скачать модель {model}: нет связи ({getattr(e, 'reason', e)})", offline=True)
+    raise LLMError(f"Скачивание модели {model} оборвалось — попробуй ещё раз")
+
+
+def ollama_caps(model):
+    if model not in OCAPS:
+        try:
+            OCAPS[model] = set(ollama_api("/api/show", {"model": model}).get("capabilities") or [])
+        except Exception:
+            OCAPS[model] = {"completion", "tools"}
+    return OCAPS[model]
+
+
+def to_ollama(messages):
+    """Разговор в формате OpenAI → родной формат Ollama (аргументы — объектом, ответ инструмента — с tool_name)."""
+    out = []
+    for m in messages:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            out.append({"role": "assistant", "content": m.get("content") or "",
+                        "tool_calls": [{"type": "function", "function": {
+                            "name": c["function"]["name"], "arguments": args_of(c["function"].get("arguments"))}}
+                            for c in m["tool_calls"]]})
+        elif m.get("role") == "tool":
+            out.append({"role": "tool", "content": m.get("content") or "", "tool_name": m.get("name", "")})
+        else:
+            out.append({"role": m.get("role"), "content": m.get("content") or ""})
+    return out
+
+
+def args_of(raw):
+    if isinstance(raw, dict):
+        return raw
+    try:
+        v = json.loads(raw or "{}")
+        return v if isinstance(v, dict) else {}
+    except ValueError:
+        return {}
+
+
+def call_ollama(model, messages):
+    """Родной API Ollama: можно выключить «размышления» (think) и задать размер контекста."""
+    caps = ollama_caps(model)
+    body = {"model": model, "messages": to_ollama(messages), "stream": False, "keep_alive": "30m",
+            "options": {"num_ctx": int(cfg["local"].get("ctx") or 8192)}}
+    if "tools" in caps:
+        body["tools"] = TOOLS
+    if "thinking" in caps:
+        body["think"] = False                 # на телефоне размышления слишком долгие
+    try:
+        data = ollama_api("/api/chat", body, timeout=1800)
+    except urllib.error.HTTPError as e:
+        text = e.read().decode(errors="replace")[:1000]
+        try:
+            text = json.loads(text).get("error") or text
+        except (ValueError, AttributeError):
+            pass
+        raise LLMError(f"Ollama: {first_line(text)}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise LLMError(f"Ollama не отвечает: {getattr(e, 'reason', e)}")
+    m = data.get("message") or {}
+    calls = [{"id": f"call_{i}", "type": "function",
+              "function": {"name": (tc.get("function") or {}).get("name", ""),
+                           "arguments": json.dumps((tc.get("function") or {}).get("arguments") or {}, ensure_ascii=False)}}
+             for i, tc in enumerate(m.get("tool_calls") or [])]
+    return {"role": "assistant", "content": m.get("content") or "", "tool_calls": calls}
+
+
+THINK_RE = re.compile(r"<think>.*?</think>\s*", re.S)
+
+
+def salvage_calls(text):
+    """Маленькие модели иногда пишут вызов инструмента текстом: {"name": "write_file", "arguments": {...}}."""
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip())
+    try:
+        v = json.loads(t)
+    except ValueError:
+        return []
+    out = []
+    for i, c in enumerate(v if isinstance(v, list) else [v]):
+        if isinstance(c, dict) and c.get("name") in FUNCS:
+            a = c.get("arguments", c.get("parameters", {}))
+            out.append({"id": f"txt_{i}", "type": "function",
+                        "function": {"name": c["name"], "arguments": a if isinstance(a, str) else json.dumps(a, ensure_ascii=False)}})
+    return out
+
+
+def msize(m):
+    return len(str(m.get("content") or "")) + len(json.dumps(m.get("tool_calls") or "", ensure_ascii=False))
+
+
+def shrink_call(c):
+    """Длинные аргументы старого вызова (содержимое записанного файла) — коротко: файл и так на диске."""
+    a = args_of((c.get("function") or {}).get("arguments"))
+    a = {k: (clip(v, 200) if isinstance(v, str) else v) for k, v in a.items()}
+    return dict(c, function=dict(c.get("function") or {}, arguments=json.dumps(a, ensure_ascii=False)))
+
+
+def trimmed(h, local):
+    """Для маленькой модели — только последние обмены, которые помещаются в её память (целиком, с вопроса)."""
+    # ~1.5 символа на токен с запасом: русский текст и код; остаток — правила, инструменты и ответ модели
+    budget = int(int(cfg["local"].get("ctx") or 8192) * 1.5) if local else 400000
+    rest, start, total = h[1:], len(h) - 1, 0
+    for i in range(len(rest) - 1, -1, -1):
+        total += msize(rest[i])
+        if rest[i].get("role") == "user":
+            if total > budget and start < len(rest):
+                break
+            start = i
+    keep = [dict(m) for m in rest[start:]]
+    if sum(map(msize, keep)) > budget:            # текущая задача сама не влезает — ужимаем старые выводы
+        for m in [m for m in keep if m.get("role") == "tool"][:-2]:
+            m["content"] = clip(m["content"], 300)
+        if local:                                 # и старые записанные файлы (облачным моделям вызовы не меняем:
+            for m in [m for m in keep if m.get("tool_calls")][:-1]:      # Gemini сверяет их подписи)
+                m["tool_calls"] = [shrink_call(c) for c in m["tool_calls"]]
+    return [{"role": "system", "content": system_for(local)}] + keep
+
+
+def run_llm(e, prompt):
+    """Движки на API: модель вызывает инструменты (файлы, команды) в Termux, пока не даст ответ."""
+    res, pname = new_res(e), prov(e)
+    p, model, local = pconf(pname), model_of(e), prov(e) == "ollama"
+    res["model"] = model
+    if not model:
+        res["error"] = f"Не указана модель — открой ⚙ («{lb(e)}»)."
+        return res
+    if not local and not p.get("api_key"):
+        res["error"] = f"Нет API-ключа для «{lb(e)}» — открой ⚙ и вставь ключ."
+        return res
+    start = len(HISTORY)
+    try:
+        if local:
+            interruptible(ensure_ollama, model)
+        HISTORY.append({"role": "user", "content": prompt})
+        cap = 6000 if local else MAX_READ        # маленькой модели — короткие выдержки из файлов
         for _ in range(cfg["max_steps"]):
             if BUSY["stop"]:
-                raise InterruptedError("⏹ Остановлено")
-            m = call_llm(HISTORY)["choices"][0]["message"]
-            calls = m.get("tool_calls") or []
-            if not calls:
-                text = m.get("content") or "(пустой ответ)"
-                HISTORY.append({"role": "assistant", "content": text})
-                log("bot", text, meta={"engine": f"API · {cfg['provider']}",
-                                       "model": cfg["providers"].get(cfg["provider"], {}).get("model", "")})
-                return
-            HISTORY.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
-            for c in calls:
-                fn = c["function"]["name"]
-                raw = c["function"].get("arguments") or "{}"
-                args = {}
+                raise Stopped()
+            BUSY["doing"] = "модель думает…"
+            msgs = trimmed(HISTORY, local)
+            for attempt in range(4):
                 try:
-                    args = raw if isinstance(raw, dict) else json.loads(raw)
-                    res = FUNCS[fn](**args) if fn in FUNCS else f"нет такого инструмента: {fn}"
-                except Exception as e:
-                    res = f"ОШИБКА: {type(e).__name__}: {e}"
+                    m = interruptible(call_ollama, model, msgs) if local else interruptible(call_openai, p, model, msgs)
+                    break
+                except LLMError as ex:            # лимит «в минуту» — ждём и повторяем, «в сутки» — отдаём резерву
+                    wait = ex.until - time.time()
+                    if not ex.limit or wait > 70 or attempt == 3:
+                        raise
+                    BUSY["doing"] = f"лимит запросов в минуту — жду {max(1, round(wait))} с…"
+                    while time.time() < ex.until:
+                        if BUSY["stop"]:
+                            raise Stopped()
+                        time.sleep(0.5)
+            text = THINK_RE.sub("", m.get("content") or "").strip()
+            calls = m.get("tool_calls") or salvage_calls(text)
+            if not calls:
+                HISTORY.append({"role": "assistant", "content": text or "(пустой ответ)"})
+                res.update(ok=True, text=text or "(пустой ответ)")
+                break
+            HISTORY.append({"role": "assistant", "content": "" if salvage_calls(text) else text, "tool_calls": calls})
+            for c in calls:
+                if BUSY["stop"]:
+                    raise Stopped()
+                fn = str((c.get("function") or {}).get("name") or "")
+                args = args_of((c.get("function") or {}).get("arguments"))
+                BUSY["doing"] = f"{fn} {brief(args)}"
+                try:
+                    out = FUNCS[fn](**args) if fn in FUNCS else f"нет такого инструмента: {fn}"
+                except Exception as ex:
+                    out = f"ОШИБКА: {type(ex).__name__}: {ex}"
+                out = str(out)
                 log("step", tool=fn, brief=brief(args), args=json.dumps(args, ensure_ascii=False)[:800],
-                    result=str(res)[:2000], err=str(res).startswith("ОШИБКА"))
-                HISTORY.append({"role": "tool", "tool_call_id": c.get("id", ""), "name": fn, "content": str(res)})
-        log("bot", "Достигнут лимит шагов. Напиши «продолжай».")
-    except InterruptedError as e:
-        del HISTORY[start:]
-        log("sys", str(e))
-    except Exception as e:
-        del HISTORY[start:]
-        log("err", str(e))
+                    result=out[:2000], err=out.startswith("ОШИБКА"))
+                HISTORY.append({"role": "tool", "tool_call_id": c.get("id", ""), "name": fn,
+                                "content": out if len(out) <= cap else out[:cap] + "\n… (обрезано)"})
+        else:
+            res.update(ok=True, text="Достигнут лимит шагов. Напиши «продолжай».")
+    except Stopped:
+        res["stopped"] = True
+    except LLMError as ex:
+        res.update(error=str(ex), limit=ex.limit, offline=ex.offline, limit_until=int(ex.until))
+    except Exception as ex:
+        res["error"] = f"{type(ex).__name__}: {ex}"
     finally:
+        BUSY["doing"] = ""
+        if not res["ok"]:
+            del HISTORY[start:]
         jsave(HIST, HISTORY)
+    return res
 
 
 # ---------- движки по подписке: общее ----------
@@ -393,6 +832,9 @@ LIMIT_RE = re.compile(r"hit your [^.\n]{0,40}limit|usage limit|rate.?limit|limit
 AUTH_RE = re.compile(r"\b401\b|unauthori[sz]ed|not logged in|log ?in again|/login|authenticat|token (has )?expired|"
                      r"invalid.{0,20}(token|api.key)", re.I)
 LOST_RE = re.compile(r"no conversation found|session.{0,30}not found", re.I)
+NET_RE = re.compile(r"connection (error|refused|reset)|network (error|is unreachable)|getaddrinfo|ENOTFOUND|EAI_AGAIN|"
+                    r"ECONNREFUSED|ETIMEDOUT|name resolution|could not resolve|error sending request|stream disconnected",
+                    re.I)
 
 
 def brief(a):
@@ -449,11 +891,23 @@ def bins(e):
 
 
 def installed(e):
-    """Установлен ли движок в Ubuntu: True / False; None — проверить нельзя."""
+    """Установлен ли движок: True / False; None — проверить нельзя.
+    Бесплатный ИИ — есть ли ключ, локальный — есть ли Ollama."""
+    if e == "free":
+        return not free_problem()
+    if e == "local":
+        return bool(shutil.which("ollama")) or ollama_up()
     r = rootfs()
     if r is None:
         return None
     return any(os.path.lexists(r / b.lstrip("/")) for b in bins(e))   # lexists: это ссылки внутри Ubuntu
+
+
+def free_problem():
+    """Чего не хватает бесплатному ИИ: ключа или модели (у OpenRouter модели по умолчанию нет)."""
+    if not pconf(prov("free")).get("api_key"):
+        return "нет ключа"
+    return "" if model_of("free") else "не выбрана модель"
 
 
 def logged_in(e):
@@ -487,9 +941,12 @@ def usable(e):
 
 def why(e):
     if installed(e) is False:
-        return f"{NAME[e]} не установлен"
-    m = STATE.get("limits", {}).get(e, {}).get("msg")
-    return f"⛔ {NAME[e]} на лимите" + (f" ({m})" if m else "")
+        if e == "free":
+            return f"бесплатный ИИ не настроен ({free_problem()})"
+        return "Ollama не установлен" if e == "local" else f"{nm(e)} не установлен"
+    m = str(STATE.get("limits", {}).get(e, {}).get("msg") or "")
+    m = m if len(m) <= 100 else m[:100].rstrip() + "…"
+    return f"⛔ {nm(e)} на лимите" + (f" ({m})" if m else "")
 
 
 def set_usage(e, wins, full=False):
@@ -740,7 +1197,8 @@ def refresh_usage(force=False, manual=False):
 # ---------- запуск движка в Ubuntu ----------
 def new_res(e):
     return {"engine": e, "ok": False, "text": "", "error": "", "limit": False, "limit_until": 0, "limit_seen": False,
-            "stopped": False, "timeout": False, "session": None, "model": "", "turns": None, "tail": []}
+            "offline": False, "stopped": False, "timeout": False, "session": None, "model": "", "turns": None,
+            "tail": []}
 
 
 def proot_cmd(prog, script, args, ws=WSR):
@@ -819,6 +1277,8 @@ def conclude(e, p, res):
         res["error"] = f"{LABEL[e]} завершился без ответа (код {p.returncode if p else '?'})." + (f"\n{tail}" if tail else "")
     if res["limit_seen"] or LIMIT_RE.search(res["error"] + "\n" + tail):
         res["limit"] = True
+    elif NET_RE.search(res["error"] + "\n" + tail):
+        res["offline"] = True                   # нет интернета — поможет только локальная модель
     return res
 
 
@@ -1000,7 +1460,74 @@ def run_codex(prompt, ws=WSR, sid=None, save=True, tag=""):
 
 
 def run_engine(e, prompt, **kw):
+    if e in APIS:
+        return run_llm(e, prompt)
     return (run_claude if e == "claude" else run_codex)(prompt, **kw)
+
+
+def list_models(name):
+    """Модели, доступные по ключу (Gemini, OpenRouter — только бесплатные) или скачанные в Ollama."""
+    if name == "ollama":
+        st = local_status()
+        return st["models"], "" if st["running"] else "Ollama не запущен — агент запустит его сам при первой задаче"
+    p = pconf(name)
+    if not p.get("api_key"):
+        return [], "Сначала вставь ключ и нажми «Сохранить»"
+    req = urllib.request.Request(p["base_url"].rstrip("/") + "/models",
+                                 headers={"Authorization": "Bearer " + p["api_key"]})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        text = e.read().decode(errors="replace")[:8000]
+        if e.code in (401, 403) or BADKEY_RE.search(text):
+            return [], f"Ключ не подошёл ({e.code}): {first_line(api_err(text))[:200]}"
+        return [], f"Сервис ответил {e.code}: {first_line(api_err(text))[:200]}"
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return [], f"Нет связи: {getattr(e, 'reason', e)}"
+    except ValueError:
+        return [], "Сервис прислал непонятный ответ"
+    ids = {re.sub(r"^models/", "", str(m.get("id") or "")) for m in (data.get("data") or []) if isinstance(m, dict)}
+    if name == "gemini":                        # только текстовые Gemini (без озвучки, картинок, «Live»)
+        ids = {i for i in ids if i.startswith("gemini") and
+               not re.search(r"tts|live|image|transcribe|embedding|audio|banana|omni|robotics|computer", i)}
+    elif name == "openrouter":                  # только бесплатные модели
+        ids = {i for i in ids if i.endswith(":free")}
+    return sorted(ids - {""}), ""
+
+
+def local_status():
+    up = ollama_up()
+    models = []
+    if up:
+        try:
+            models = sorted({m.get("name", "") for m in ollama_api("/api/tags").get("models") or []} - {""})
+        except Exception:
+            pass
+    return {"installed": bool(shutil.which("ollama")) or up, "running": up, "models": models,
+            "model": model_of("local"), "url": ollama_root()}
+
+
+def start_pull(model):
+    """Скачать локальную модель заранее (кнопка в ⚙) — как задача: с прогрессом и кнопкой ⏹."""
+    BUSY.update(on=True, stop=False, proc=None, started=time.time(), phase="📥 Скачиваю модель", doing="")
+
+    def work():
+        try:
+            if not interruptible(ensure_ollama, model):
+                log("sys", f"✓ Модель {model} уже скачана")
+            if cfg["engine"] != "local":
+                log("sys", "Чтобы работать с ней, выбери в шапке «Локальный ИИ».")
+        except Stopped:
+            log("sys", "⏹ Скачивание остановлено")
+        except LLMError as ex:
+            log("err", str(ex))
+        except Exception as ex:
+            log("err", f"{type(ex).__name__}: {ex}")
+        finally:
+            BUSY.update(on=False, proc=None, phase="", doing="")
+
+    threading.Thread(target=work, daemon=True).start()
 
 
 # ---------- задачи: один ИИ, резерв, тандем ----------
@@ -1008,39 +1535,49 @@ def skey(e):
     return "cc_session" if e == "claude" else "cx_session"
 
 
+def sync_key(e):
+    return "api" if e in APIS else e          # бесплатный и локальный ИИ ведут общий разговор
+
+
 def cur_model(e):
+    if e in APIS:
+        return model_of(e)
     seen, chosen = STATE.get("cc_model" if e == "claude" else "cx_model", ""), cfg[e].get("model", "")
     return seen if (not chosen or chosen in seen) else chosen
 
 
 def with_context(e, msg, upto):
     """Если часть разговора прошла без этого ИИ (работал другой) — коротко пересказываем её."""
-    since = STATE.get("synced", {}).get(e, 0)
+    since = STATE.get("synced", {}).get(sync_key(e), 0)
+    n, size = (4, 600) if e == "local" else (6, 1500)     # у маленькой локальной модели мало памяти
     with LOCK:
-        missed = [x for x in LOG if since < x["seq"] < upto and x["t"] in ("user", "bot")][-6:]
+        missed = [x for x in LOG if since < x["seq"] < upto and x["t"] in ("user", "bot")][-n:]
     if not missed:
         return msg
     lines = [("Пользователь" if x["t"] == "user" else (x.get("meta") or {}).get("engine") or "ИИ") + ": " +
-             clip(x["text"], 1500) for x in missed]
+             clip(x["text"], size) for x in missed]
     return ("[Контекст: эти сообщения разговора прошли без тебя — с пользователем работал другой ИИ. "
             "Файлы в /workspace — в актуальном состоянии.]\n\n" + "\n\n".join(lines) +
             "\n\n[Конец контекста]\n\nНовое сообщение пользователя:\n" + msg)
 
 
-def handoff(alt, prev, msg, upto):
+def handoff(alt, prev, msg, upto, offline=False):
     return (with_context(alt, msg, upto) +
-            f"\n\n[Эту задачу начал {NAME[prev]}, но у него закончился лимит. Часть изменений в /workspace "
-            "могла уже быть сделана — проверь текущее состояние файлов и доведи задачу до конца.]")
+            f"\n\n[Эту задачу начал {nm(prev)}, но {'пропала связь с интернетом' if offline else 'у него закончился лимит'}. "
+            "Часть изменений в /workspace могла уже быть сделана — проверь текущее состояние файлов и доведи задачу до конца.]")
 
 
 def author_run(e, prompt, phase):
     """Запуск в основном разговоре движка (продолжая его сессию) с учётом лимитов."""
     BUSY["phase"] = phase
-    sid = STATE.get(skey(e))
-    r = run_engine(e, prompt, sid=sid)
-    if sid and not r["ok"] and not r["stopped"] and LOST_RE.search(r["error"]):
-        STATE.pop(skey(e), None)            # сессия потерялась — начинаем новую
+    if e in APIS:
         r = run_engine(e, prompt)
+    else:
+        sid = STATE.get(skey(e))
+        r = run_engine(e, prompt, sid=sid)
+        if sid and not r["ok"] and not r["stopped"] and LOST_RE.search(r["error"]):
+            STATE.pop(skey(e), None)            # сессия потерялась — начинаем новую
+            r = run_engine(e, prompt)
     if r["ok"]:
         clear_limit(e)
     elif r["limit"]:
@@ -1048,14 +1585,26 @@ def author_run(e, prompt, phase):
     return r
 
 
+def chain(e):
+    """Порядок резерва: подписки подменяют друг друга, дальше — бесплатный и локальный ИИ."""
+    if e in SUBS:
+        return [other(e), "free", "local"]
+    return ["local"] if e == "free" else []
+
+
 def hint(e, r):
     if r["limit"]:
-        alt = other(e)
         if not cfg.get("fallback", True):
-            return f"\n\nЛимит {NAME[e]} исчерпан. Включи «Резерв» в ⚙ — тогда задачу продолжит {NAME[alt]}."
-        if installed(alt) is False:
-            return f"\n\nЛимит {NAME[e]} исчерпан. Подключи {NAME[alt]} (см. ⚙) — он будет подменять."
-        return f"\n\nЛимит {NAME[e]} исчерпан, {NAME[alt]} тоже недоступен. Дождись сброса лимита или выбери API-модель."
+            return f"\n\nЛимит {nm(e)} исчерпан. Включи «Резерв» в ⚙ — тогда задачу продолжит следующий ИИ."
+        if e == "free":
+            return ("\n\nПодожди, пока лимит обнулится, или выбери в ⚙ другую модель — у каждой свой лимит "
+                    "(например, gemini-3.5-flash-lite). Без лимитов работает локальный ИИ (⚙ → «Локальный ИИ»).")
+        return (f"\n\nЛимит {nm(e)} исчерпан, а резервные ИИ недоступны. Дождись сброса лимита или подключи "
+                "бесплатный или локальный ИИ (⚙).")
+    if r.get("offline"):
+        return "" if usable("local") else "\n\nНет связи с интернетом. Без сети работает только локальный ИИ (⚙ → «Локальный ИИ»)."
+    if e in APIS:
+        return ""
     if AUTH_RE.search(r["error"] + "\n" + "\n".join(r["tail"])):
         return LOGIN[e]
     if "не установлен" in r["error"]:
@@ -1066,13 +1615,13 @@ def hint(e, r):
 def finish(e, r, review=""):
     """Итог задачи в журнал: ответ, остановка или ошибка с подсказкой."""
     if r["ok"]:
-        meta = {"sec": round(time.time() - BUSY["started"]), "engine": LABEL[e], "model": r["model"] or cur_model(e)}
+        meta = {"sec": round(time.time() - BUSY["started"]), "engine": lb(e), "model": r["model"] or cur_model(e)}
         if r["turns"] is not None and not review:
             meta["turns"] = r["turns"]
         if review:
             meta["review"] = review
         log("bot", r["text"], meta=meta)
-        STATE.setdefault("synced", {})[e] = SEQ         # этот ИИ знает разговор до этого места
+        STATE.setdefault("synced", {})[sync_key(e)] = SEQ   # этот ИИ знает разговор до этого места
         save_state()
     elif r["stopped"]:
         log("sys", "⏹ Остановлено")
@@ -1081,25 +1630,39 @@ def finish(e, r, review=""):
 
 
 def pick(e):
-    """Кого запускать: выбранный ИИ или (при включённом резерве) второй, если выбранный недоступен."""
-    alt = other(e)
+    """Кого запускать: выбранный ИИ или (при включённом резерве) следующий доступный по цепочке."""
     if usable(e) or not cfg.get("fallback", True):
         return e
-    if usable(alt) or (installed(e) is False and installed(alt) is not False):
-        return alt
-    return e                                # оба недоступны — пробуем выбранный (лимит мог уже сброситься)
+    for x in chain(e):
+        if usable(x):
+            return x
+    if installed(e) is False:               # выбранный не установлен — берём следующий установленный (лимит мог сброситься)
+        for x in chain(e):
+            if installed(x) is not False:
+                return x
+    return e                                # все недоступны — пробуем выбранный (лимит мог уже сброситься)
+
+
+def fallback_loop(e, r, msg, upto, tried, note=""):
+    """Кончился лимит или пропала сеть — передаём задачу следующему ИИ по цепочке резерва."""
+    while cfg.get("fallback", True) and (r["limit"] or r["offline"]) and not r["stopped"]:
+        cands = ["local"] if r["offline"] else chain(e)       # без сети выручит только локальная модель
+        nxt = next((x for x in cands if x not in tried and usable(x)), None)
+        if not nxt:
+            break
+        log("sys", f"{'📡' if r['offline'] else '⛔'} {nm(e)}: {first_line(r['error'])}\nЗадачу продолжает {nm(nxt)}{note}.")
+        r, e = author_run(nxt, handoff(nxt, e, msg, upto, r["offline"]), f"{nm(nxt)} (резерв)"), nxt
+        tried.add(nxt)
+    return e, r
 
 
 def run_single(e, msg, upto):
-    fb = cfg.get("fallback", True)
-    if pick(e) != e:
-        log("sys", f"{why(e)} — задачу выполнит {NAME[other(e)]}.")
-        e = other(e)
-    alt = other(e)
-    r = author_run(e, with_context(e, msg, upto), "" if e == cfg["engine"] else f"{NAME[e]} (резерв)")
-    if r["limit"] and fb and usable(alt):
-        log("sys", f"⛔ {NAME[e]}: {first_line(r['error'])}\nЗадачу продолжает {NAME[alt]}.")
-        r, e = author_run(alt, handoff(alt, e, msg, upto), f"{NAME[alt]} (резерв)"), alt
+    first = pick(e)
+    if first != e:
+        log("sys", f"{why(e)} — задачу выполнит {nm(first)}.")
+    e = first
+    r = author_run(e, with_context(e, msg, upto), "" if e == cfg["engine"] else f"{nm(e)} (резерв)")
+    e, r = fallback_loop(e, r, msg, upto, {e})
     finish(e, r)
 
 
@@ -1187,15 +1750,18 @@ def review_ok(t):
 def run_duo(msg, upto):
     """Тандем: автор пишет → ревьюер проверяет копию файлов → автор исправляет (1–2 круга)."""
     a = cfg["duo"].get("author", "claude")
-    b, fb = other(a), cfg.get("fallback", True)
-    if pick(a) != a:
-        log("sys", f"{why(a)} — задачу выполнит {NAME[b]}, без проверки.")
-        return finish(b, author_run(b, with_context(b, msg, upto), f"{NAME[b]} (резерв)"))
+    b = other(a)
+    first = pick(a)
+    if first != a:
+        log("sys", f"{why(a)} — задачу выполнит {nm(first)}, без проверки.")
+        r = author_run(first, with_context(first, msg, upto), f"{nm(first)} (резерв)")
+        return finish(*fallback_loop(first, r, msg, upto, {a, first}))
     before = scan()
     r = author_run(a, with_context(a, msg, upto), f"✍ {NAME[a]} пишет")
-    if r["limit"] and fb and usable(b):
-        log("sys", f"⛔ {NAME[a]}: {first_line(r['error'])}\nЗадачу продолжает {NAME[b]} (без проверки).")
-        return finish(b, author_run(b, handoff(b, a, msg, upto), f"{NAME[b]} (резерв)"))
+    if r["limit"] or r["offline"]:
+        e2, r2 = fallback_loop(a, r, msg, upto, {a}, " (без проверки)")
+        if e2 != a:
+            return finish(e2, r2)
     if not r["ok"]:
         return finish(a, r)
     changed = diff(before, scan())
@@ -1246,6 +1812,15 @@ def run_duo(msg, upto):
 
 
 def eng_warn(e):
+    if e == "free" and installed(e) is False:
+        return ("нужен бесплатный ключ" if free_problem() == "нет ключа" else "выбери модель") + " — см. ⚙"
+    if e == "local" and installed(e) is False:
+        return "установи Ollama — см. ⚙"
+    if e in APIS:
+        if not limited(e):
+            return ""
+        spare = cfg.get("fallback", True) and usable("local")
+        return f"лимит {nm(e)} исчерпан" + (" — задачи пока выполняет локальный ИИ" if spare else "")
     if installed(e) is False:
         return f"{NAME[e]} не установлен — см. ⚙"
     if logged_in(e) is False:
@@ -1265,12 +1840,9 @@ def engine_info():
         info = {"engine": "duo", "label": "Тандем", "via": "подписки Claude + ChatGPT", "author": NAME[a],
                 "reviewer": NAME[other(a)], "warn": eng_warn(a) or eng_warn(other(a))}
         used = [a, other(a)]
-    else:
-        name = cfg["provider"]
-        p = cfg["providers"].get(name, {})
-        ready = bool(p.get("model")) and (bool(p.get("api_key")) or name == "ollama")
-        info = {"engine": "api", "label": f"API · {name}", "via": "локально" if name == "ollama" else "API-ключ",
-                "model": p.get("model", ""), "model_set": p.get("model", ""), "warn": "" if ready else "настрой в ⚙"}
+    else:                                       # бесплатный или локальный ИИ
+        info = {"engine": e, "label": "Бесплатный ИИ" if e == "free" else "Локальный ИИ", "model": model_of(e),
+                "via": f"{nm(e)} · бесплатно" if e == "free" else "на телефоне · Ollama", "warn": eng_warn(e)}
         used = []
     lim = STATE.get("limits", {})
     info["usage"] = [{"id": x, "name": NAME[x], "active": x in used, "w": usage(x), "t": usage_time(x),
@@ -1291,8 +1863,6 @@ def start_job(msg):
             auto_backup()
             if BUSY["stop"]:
                 log("sys", "⏹ Остановлено")
-            elif mode == "api":
-                run_api(msg)
             elif mode == "duo":
                 run_duo(msg, upto)
             else:
@@ -1301,7 +1871,7 @@ def start_job(msg):
             log("err", f"{type(e).__name__}: {e}")
         finally:
             BUSY.update(on=False, proc=None, phase="", doing="")
-            if mode != "api":
+            if mode not in APIS:
                 refresh_usage(force=True)          # свежий расход лимитов после задачи
 
     threading.Thread(target=work, daemon=True).start()
@@ -1382,6 +1952,8 @@ class H(BaseHTTPRequestHandler):
                                    "elapsed": round(time.time() - BUSY["started"]) if BUSY["on"] else 0})
         if path == "/api/files":
             return send(self, 200, {"files": files_list()})
+        if path == "/api/local":
+            return send(self, 200, local_status())
         if path.startswith("/preview/"):
             rest = urllib.parse.quote(path[len("/preview/"):])
             return send(self, 302, "", "text/plain", {"Location": f"http://127.0.0.1:{PPORT}/{rest}"})
@@ -1421,6 +1993,21 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/usage":
             refresh_usage(manual=True)
             return send(self, 200, {"ok": True})
+        if self.path == "/api/models":
+            name = str(data.get("provider") or "")
+            if name not in ("gemini", "openrouter", "ollama"):
+                return send(self, 400, {"error": "неизвестный сервис"})
+            models, err = list_models(name)
+            return send(self, 200, {"models": models, "error": err})
+        if self.path == "/api/pull":
+            model = str(data.get("model") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9][\w.\-/]*(:[\w.\-]+)?", model):
+                return send(self, 400, {"error": "неверное имя модели"})
+            with JOB_LOCK:
+                if BUSY["on"]:
+                    return send(self, 409, {"error": "Агент занят — дождись конца задачи"})
+                start_pull(model)
+            return send(self, 200, {"ok": True})
         if self.path == "/api/reset":
             if BUSY["on"]:
                 return send(self, 409, {"error": "Сначала останови текущую задачу (⏹)"})
@@ -1431,7 +2018,7 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 LOG.clear()
             log("sys", "Новый разговор")
-            STATE["synced"] = {e: SEQ for e in SUBS}
+            STATE["synced"] = {e: SEQ for e in SUBS + ("api",)}
             save_state()
             return send(self, 200, {"ok": True})
         if self.path == "/api/backup":

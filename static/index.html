@@ -75,7 +75,7 @@ textarea{flex:1;resize:none;background:var(--bg);color:var(--fg);border:1px soli
 a{color:var(--acc)}
 </style></head><body>
 <header><b>🤖 Агент</b>
-<select id="eng" onchange="setEng()"><option value="claude">Claude Code</option><option value="codex">Codex</option><option value="duo">Тандем</option><option value="api">API-модель</option></select>
+<select id="eng" onchange="setEng()"><option value="claude">Claude Code</option><option value="codex">Codex</option><option value="duo">Тандем</option><option value="free">Бесплатный ИИ</option><option value="local">Локальный ИИ</option></select>
 <button onclick="files()">📁</button><button onclick="backup()">💾</button><button id="rst" onclick="reset()">🗑</button><button onclick="toggleSet()">⚙</button></header>
 <div id="info" onclick="toggleSet()"><span id="iDot"></span><b id="iEng">…</b><span id="iModel" class="chip"></span><span id="iVia" class="chip"></span><span id="iState"></span></div>
 <div id="lims" onclick="toggleLims()" title="Лимиты подписок: нажми для подробностей"></div>
@@ -102,15 +102,28 @@ a{color:var(--acc)}
 <p class="hint">Один ИИ пишет, второй проверяет копию файлов и присылает замечания, автор исправляет. Ревьюер ничего не меняет в проектах. Тратит лимиты обеих подписок.</p>
 <label>Роли</label><select id="duoA"><option value="claude">Claude пишет — Codex проверяет</option><option value="codex">Codex пишет — Claude проверяет</option></select>
 <label>Проверок за задачу</label><select id="duoR"><option value="1">1 — проверка и исправление</option><option value="2">2 — плюс повторная проверка</option></select>
+<h4>Бесплатный ИИ</h4>
+<p class="hint">Облачная модель с бесплатным тарифом: подменяет Claude и Codex, когда у них кончился лимит, и работает в той же Ubuntu (сайты, проверки, APK). Бесплатные запросы ограничены в минуту и в сутки.</p>
+<label>Сервис</label><select id="fprov" onchange="fillFree()"><option value="gemini">Google Gemini — рекомендую</option><option value="openrouter">OpenRouter — бесплатные модели</option></select>
+<label>API-ключ <span id="fhas"></span></label><input id="fkey" type="password" placeholder="пусто — не менять" autocomplete="off">
+<label>Модель</label><input id="fmod" list="fmods" placeholder="по умолчанию"><datalist id="fmods"></datalist>
+<p style="margin:6px 0 0"><button onclick="loadModels()">Показать доступные модели</button> <span id="fmsg" class="hint"></span></p>
+<details class="how"><summary>Как получить бесплатный ключ Gemini</summary>
+<p>1. Открой в Chrome <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> и войди в аккаунт Google.</p>
+<p>2. Нажми «Create API key» и скопируй ключ. Карта не нужна.</p>
+<p>3. Вставь ключ в поле выше и нажми «Сохранить».</p></details>
+<h4>Локальный ИИ</h4>
+<p class="hint">Модель прямо на телефоне (Ollama): без интернета и без лимитов, но медленнее и проще облачных — для небольших задач. Агент сам запускает Ollama и скачивает модель при первой задаче.</p>
+<p id="lstat" class="hint"></p>
+<label>Модель</label><select id="lmod"></select>
+<label>Память модели (контекст)</label><select id="lctx"><option value="4096">4096 — экономнее и быстрее</option><option value="8192">8192 — по умолчанию</option><option value="16384">16384 — больше памяти</option></select>
+<p style="margin:6px 0 0"><button onclick="pullModel()">📥 Скачать модель сейчас</button></p>
+<details class="how"><summary>Как установить Ollama (один раз)</summary>
+<p>В Termux:</p><pre>pkg install ollama</pre>
+<p>Запускать Ollama вручную не нужно — агент сделает это сам.</p></details>
 <h4>Резерв</h4>
-<label class="chk"><input type="checkbox" id="fb"> Кончился лимит у одного ИИ — задачу продолжит другой</label>
-<p class="hint">Расход лимитов обеих подписок — на шкалах под строкой движка (нажми на них для подробностей).</p>
-<h4>API-модель</h4>
-<p class="hint">Запасной движок: Gemini или OpenRouter по API-ключу, либо локальная модель Ollama. Работает с файлами в Termux, но не собирает APK.</p>
-<label>Провайдер</label><select id="prov" onchange="fill()"></select>
-<label>Модель</label><input id="model" placeholder="имя модели">
-<label>Base URL</label><input id="url">
-<label>API-ключ <span id="haskey"></span></label><input id="key" type="password" placeholder="пусто — не менять">
+<label class="chk"><input type="checkbox" id="fb"> Кончился лимит или пропала сеть — задачу продолжит следующий ИИ: Claude ⇄ Codex → бесплатный → локальный</label>
+<p class="hint">Расход лимитов подписок — на шкалах под строкой движка (нажми на них для подробностей).</p>
 <p class="save"><button class="p" onclick="saveSet()">Сохранить</button> <span id="ver"></span></p>
 </div>
 <div id="log"></div>
@@ -153,13 +166,14 @@ log.appendChild(d)}
 async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}
 function prettyModel(m){if(!m)return'';const x=m.match(/^claude-([a-z]+)-([0-9-]+?)(?:-\d{8})?$/);
 if(x)return x[1][0].toUpperCase()+x[1].slice(1)+' '+x[2].replace(/-/g,'.');
+const g=m.match(/^gemini-([\d.]+)-(flash|pro)(-lite)?(-preview)?$/);if(g)return 'Gemini '+g[1]+' '+(g[2]=='pro'?'Pro':'Flash')+(g[3]?'-Lite':'')+(g[4]?' (preview)':'');
 return /^gpt-/i.test(m)?m.replace(/^gpt/i,'GPT').replace(/-codex/i,'-Codex'):m}
 function fmt(t){return t<60?t+' с':Math.floor(t/60)+':'+String(t%60).padStart(2,'0')}
 function hhmm(t){const d=new Date(t*1000),s=d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
 return d-Date.now()>20*3600e3?d.toLocaleDateString('ru-RU',{day:'numeric',month:'short'})+' '+s:s}
 function renderInfo(j){const i=j.info||{};$('#iEng').textContent=i.label||'';
 $('#iModel').textContent=i.engine=='duo'?'✍ '+i.author+' · 🔍 '+i.reviewer:
- i.model?prettyModel(i.model):(i.engine=='api'?'модель не выбрана':'модель по умолчанию');
+ i.model?prettyModel(i.model):'модель по умолчанию';
 $('#iVia').textContent=i.via||'';
 let st='готов',col='#3ecf8e';
 if(j.busy){st='⏳ '+(j.phase||'работает')+' · '+fmt(j.elapsed||0);col='#f5b84a'}else if(i.warn){st='⚠ '+i.warn;col='#e5534b'}
@@ -212,20 +226,37 @@ async function reset(){const b=$('#rst');
 if(!armed){armed=setTimeout(disarm,3000);b.textContent='🗑?';b.classList.add('warn');toast('Нажми 🗑 ещё раз — начнётся новый разговор (файлы останутся)');return}
 clearTimeout(armed);disarm();$('#toast').style.display='none';
 const j=await api('/api/reset',{});if(j.error){render({t:'err',text:j.error});return}log.innerHTML='';last=0;poll()}
-function toggleSet(){const s=$('#set');s.style.display=s.style.display=='block'?'none':'block'}
-function fill(){const p=C.providers[$('#prov').value]||{};$('#model').value=p.model||'';$('#url').value=p.base_url||'';
-$('#haskey').textContent=p.has_key?'(сохранён)':'(не задан)';$('#key').value=''}
-async function load(){try{C=await api('/api/config')}catch(e){return}$('#prov').innerHTML='';
-Object.keys(C.providers).forEach(n=>{const o=el('option',null,n);o.value=n;$('#prov').append(o)});
-$('#prov').value=C.provider;$('#eng').value=C.engine;$('#ccm').value=C.cc_model||'';$('#cxm').value=C.cx_model||'';
+function toggleSet(){const s=$('#set'),open=s.style.display!='block';s.style.display=open?'block':'none';if(open)loadLocal()}
+// Бесплатный ИИ: ключ и модель у каждого сервиса свои
+function fillFree(){const n=$('#fprov').value,p=(C.providers||{})[n]||{};$('#fhas').textContent=p.has_key?'(сохранён)':'(не задан)';
+$('#fkey').value='';$('#fmod').value=p.model||'';const dm=(C.default_models||{})[n];$('#fmod').placeholder=dm?'по умолчанию: '+dm:'выбери модель — кнопка ниже';
+$('#fmods').innerHTML='';$('#fmsg').textContent=''}
+async function loadModels(){const n=$('#fprov').value;$('#fmsg').textContent='загружаю…';
+const j=await api('/api/models',{provider:n});$('#fmods').innerHTML='';(j.models||[]).forEach(m=>{const o=el('option');o.value=m;$('#fmods').append(o)});
+$('#fmsg').textContent=j.error||('моделей: '+(j.models||[]).length+' — начни вводить имя или выбери из списка')}
+// Локальный ИИ: рекомендуемые модели + уже скачанные
+let LS={models:[]};
+function fillLocal(){const sel=$('#lmod'),cur=(C.providers&&C.providers.ollama&&C.providers.ollama.model)||(C.default_models||{}).ollama||'',got=LS.models||[];
+const rec=(C.local_models||[]).map(x=>x[0]),all=rec.concat(got.filter(m=>!rec.includes(m)));if(cur&&!all.includes(cur))all.push(cur);
+sel.innerHTML='';all.forEach(m=>{const r=(C.local_models||[]).find(x=>x[0]==m),o=el('option',null,m+(r?' — '+r[1]:'')+(got.includes(m)||got.includes(m+':latest')?' · скачана':''));o.value=m;sel.append(o)});sel.value=cur}
+async function loadLocal(){try{LS=await api('/api/local')}catch(e){return}
+$('#lstat').textContent='Ollama: '+(!LS.installed?'не установлен — см. ниже':LS.running?'запущен':'установлен (агент запустит его сам)')+
+ (LS.models&&LS.models.length?' · скачано: '+LS.models.join(', '):'');fillLocal()}
+async function pullModel(){const m=$('#lmod').value;if(!m)return;await api('/api/config',{local_model:m,local_ctx:$('#lctx').value});
+const j=await api('/api/pull',{model:m});if(j.error){toast(j.error,4000);return}toggleSet();setBusy(true);poll()}
+async function load(){try{C=await api('/api/config')}catch(e){return}
+$('#eng').value=C.engine;$('#ccm').value=C.cc_model||'';$('#cxm').value=C.cx_model||'';
 $('#cxe').value=C.cx_effort||'';$('#duoA').value=C.duo_author||'claude';$('#duoR').value=String(C.duo_rounds||1);
-$('#fb').checked=C.fallback!==false;$('#ver').textContent='Агент v'+C.version;fill()}
-async function saveSet(){C=await api('/api/config',{provider:$('#prov').value,model:$('#model').value,base_url:$('#url').value,api_key:$('#key').value,
+$('#fprov').value=C.free_provider||'gemini';$('#lctx').value=String(C.local_ctx||8192);
+$('#fb').checked=C.fallback!==false;$('#ver').textContent='Агент v'+C.version;fillFree();fillLocal()}
+async function saveSet(){C=await api('/api/config',{free_provider:$('#fprov').value,free_key:$('#fkey').value,free_model:$('#fmod').value,
+local_model:$('#lmod').value,local_ctx:$('#lctx').value,
 cc_model:$('#ccm').value,cx_model:$('#cxm').value,cx_effort:$('#cxe').value,duo_author:$('#duoA').value,duo_rounds:$('#duoR').value,fallback:$('#fb').checked});
-fill();render({t:'sys',text:'⚙ Настройки сохранены'});poll()}
+fillFree();fillLocal();render({t:'sys',text:'⚙ Настройки сохранены'});poll()}
 async function setEng(){C=await api('/api/config',{engine:$('#eng').value});
 const v=$('#eng').value,a=C.duo_author=='codex'?['Codex','Claude']:['Claude','Codex'];
-render({t:'sys',text:'Движок: '+$('#eng').selectedOptions[0].textContent+(v=='duo'?' — '+a[0]+' пишет, '+a[1]+' проверяет (роли — в ⚙)':'')});poll()}
+const extra={duo:' — '+a[0]+' пишет, '+a[1]+' проверяет (роли — в ⚙)',free:' — ключ и модель в ⚙',local:' — модель на телефоне, выбор и скачивание в ⚙'}[v]||'';
+render({t:'sys',text:'Движок: '+$('#eng').selectedOptions[0].textContent+extra});poll()}
 $('#inp').addEventListener('keydown',e=>{if(e.key=='Enter'&&(e.ctrlKey||e.metaKey))send()});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll()});
 function setStatus(t){$('#st').textContent=t}
